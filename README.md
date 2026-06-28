@@ -19,9 +19,11 @@ Schnorr *is* Nostr's event-signature scheme.
 
 ## ⚠️ Status & disclaimer
 
-Research / educational software. The crypto is optimized for speed, **not**
-constant-time side-channel resistance — do not use these keys to hold anything of
-value. No warranty (see [LICENSE](LICENSE)).
+Research / educational software. The crypto's secret operations (key generation
+and Schnorr signing) are now constant-time on the x86-64/arm64 backend, but only
+at the algorithm + field-arithmetic level — a GC'd runtime gives no formal
+microarchitectural guarantee. Still unaudited; treat as educational. No warranty
+(see [LICENSE](LICENSE)).
 
 ## What works
 
