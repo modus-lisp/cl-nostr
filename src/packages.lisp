@@ -147,7 +147,7 @@
                     (#:pool #:cl-nostr.pool)
                     (#:blossom #:cl-nostr.blossom))
   (:export
-   #:nsite-put #:nsite-publish))
+   #:nsite-put #:nsite-publish #:nsite-manifest))
 
 ;;; A thin umbrella so REPL users get everything under one nickname.
 (defpackage #:cl-nostr
