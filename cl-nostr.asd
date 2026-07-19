@@ -7,8 +7,9 @@
   :version "0.1.0"
   :author "ynniv"
   :license "MIT"
-  :depends-on ("secp256k1-fast"      ; BIP340 Schnorr + secp256k1 (the event signature scheme)
-               "ironclad"            ; SHA-256 (event ids), secure random
+  :depends-on ("secp256k1-fast"      ; BIP340 Schnorr + secp256k1 (event sigs + NIP-44 ECDH)
+               "ironclad"            ; SHA-256 (event ids), HMAC/ChaCha20 (NIP-44), secure random
+               "cl-base64"           ; NIP-44 payload base64
                "com.inuoe.jzon"      ; JSON: relay messages + events
                "websocket-driver"    ; WebSocket client (wss:// relays)
                "cl+ssl"              ; TLS for wss://
@@ -25,7 +26,10 @@
      (:file "event")      ; NIP-01 event: canonical serialization, id, sign, verify, JSON
      (:file "filter")     ; NIP-01 subscription filters
      (:file "relay")      ; one relay: websocket connect, REQ/EVENT/CLOSE, message dispatch
-     (:file "pool"))))   ; high-level multi-relay client: publish + subscribe across relays
+     (:file "pool")       ; high-level multi-relay client: publish + subscribe across relays
+     (:file "nip44")      ; NIP-44 v2 payload encryption (ECDH -> HKDF -> ChaCha20 + HMAC)
+     (:file "nip59")      ; NIP-59 gift wrap / NIP-17 private DMs (rumor -> seal -> wrap)
+     (:file "double-ratchet")))) ; Nostr Double Ratchet (yakihonne "Secure DMs", kind-1060)
   :in-order-to ((test-op (test-op "cl-nostr/test"))))
 
 (defsystem "cl-nostr/test"

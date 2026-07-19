@@ -76,6 +76,53 @@
    #:pool-relays #:pool-publish #:pool-subscribe
    #:fetch-events #:fetch-one))
 
+;;; ---- encrypted messaging ------------------------------------------------
+;;; NIP-44 v2 payload encryption, NIP-59 gift wrap (NIP-17 private DMs), and
+;;; the Nostr Double Ratchet (yakihonne "Secure DMs").  Ported from the
+;;; validated battle.crypto.* tree onto SECP256K1-FAST for the ECDH/Schnorr.
+
+(defpackage #:cl-nostr.nip44
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-nostr.util)
+                    (#:secp #:secp256k1-fast)
+                    (#:sch #:secp256k1-fast.schnorr)
+                    (#:ic #:ironclad)
+                    (#:b64 #:cl-base64))
+  (:export
+   #:conversation-key #:nip44-encrypt #:nip44-decrypt
+   #:nip44-encrypt-with-nonce #:nip44-encrypt-ck #:nip44-decrypt-ck
+   #:calc-padded-len))
+
+(defpackage #:cl-nostr.nip59
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-nostr.util)
+                    (#:k #:cl-nostr.keys)
+                    (#:ev #:cl-nostr.event)
+                    (#:secp #:secp256k1-fast)
+                    (#:sch #:secp256k1-fast.schnorr)
+                    (#:nip44 #:cl-nostr.nip44)
+                    (#:jzon #:com.inuoe.jzon))
+  (:export
+   #:build-giftwrap #:unwrap-giftwrap))
+
+(defpackage #:cl-nostr.double-ratchet
+  (:use #:cl)
+  (:nicknames #:cl-nostr.dr)
+  (:local-nicknames (#:u #:cl-nostr.util)
+                    (#:secp #:secp256k1-fast)
+                    (#:schnorr #:secp256k1-fast.schnorr)
+                    (#:nip44 #:cl-nostr.nip44)
+                    (#:ic #:ironclad)
+                    (#:jzon #:com.inuoe.jzon))
+  (:export
+   #:dr-init #:dr-send-event #:dr-receive-event
+   #:dr-session #:make-public-invite #:decrypt-invite-response
+   #:session-from-invite-response #:dr-state->json #:json->dr-state
+   #:gen-priv #:priv->pub-hex #:ck #:kdf
+   #:*message-kind* #:*invite-kind* #:*invite-response-kind* #:*chat-kind*
+   #:dr-our-current-pub #:dr-their-next-pub #:dr-their-current-pub
+   #:dr-can-send-p))
+
 ;;; A thin umbrella so REPL users get everything under one nickname.
 (defpackage #:cl-nostr
   (:use #:cl)
@@ -85,4 +132,7 @@
                     (#:event #:cl-nostr.event)
                     (#:filter #:cl-nostr.filter)
                     (#:relay #:cl-nostr.relay)
-                    (#:pool #:cl-nostr.pool)))
+                    (#:pool #:cl-nostr.pool)
+                    (#:nip44 #:cl-nostr.nip44)
+                    (#:nip59 #:cl-nostr.nip59)
+                    (#:double-ratchet #:cl-nostr.double-ratchet)))
