@@ -13,6 +13,7 @@
                "com.inuoe.jzon"      ; JSON: relay messages + events
                "websocket-driver"    ; WebSocket client (wss:// relays)
                "cl+ssl"              ; TLS for wss://
+               "dexador"             ; HTTP client (Blossom blob upload/get)
                "bordeaux-threads")   ; relay read loops + pool concurrency
   :serial t
   :components
@@ -29,7 +30,9 @@
      (:file "pool")       ; high-level multi-relay client: publish + subscribe across relays
      (:file "nip44")      ; NIP-44 v2 payload encryption (ECDH -> HKDF -> ChaCha20 + HMAC)
      (:file "nip59")      ; NIP-59 gift wrap / NIP-17 private DMs (rumor -> seal -> wrap)
-     (:file "double-ratchet")))) ; Nostr Double Ratchet (yakihonne "Secure DMs", kind-1060)
+     (:file "double-ratchet") ; Nostr Double Ratchet (yakihonne "Secure DMs", kind-1060)
+     (:file "blossom")    ; Blossom blob upload (BUD-01/02, kind-24242 auth)
+     (:file "nsite"))))   ; nsite: publish a static site to Nostr (kind-34128)
   :in-order-to ((test-op (test-op "cl-nostr/test"))))
 
 (defsystem "cl-nostr/test"

@@ -123,6 +123,32 @@
    #:dr-our-current-pub #:dr-their-next-pub #:dr-their-current-pub
    #:dr-can-send-p))
 
+;;; ---- publishing: Blossom blobs + nsite static sites --------------------
+;;; Blossom (BUD-01/02) stores content-addressed blobs behind a kind-24242
+;;; Nostr auth event; nsite maps site paths to those blobs with kind-34128
+;;; parameterized-replaceable events.  Together they publish a website to Nostr.
+
+(defpackage #:cl-nostr.blossom
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-nostr.util)
+                    (#:k #:cl-nostr.keys)
+                    (#:ev #:cl-nostr.event)
+                    (#:b64 #:cl-base64)
+                    (#:jzon #:com.inuoe.jzon))
+  (:export
+   #:blossom-upload #:blossom-url))
+
+(defpackage #:cl-nostr.nsite
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-nostr.util)
+                    (#:k #:cl-nostr.keys)
+                    (#:b #:cl-nostr.bech32)
+                    (#:ev #:cl-nostr.event)
+                    (#:pool #:cl-nostr.pool)
+                    (#:blossom #:cl-nostr.blossom))
+  (:export
+   #:nsite-put #:nsite-publish))
+
 ;;; A thin umbrella so REPL users get everything under one nickname.
 (defpackage #:cl-nostr
   (:use #:cl)
@@ -135,4 +161,6 @@
                     (#:pool #:cl-nostr.pool)
                     (#:nip44 #:cl-nostr.nip44)
                     (#:nip59 #:cl-nostr.nip59)
-                    (#:double-ratchet #:cl-nostr.double-ratchet)))
+                    (#:double-ratchet #:cl-nostr.double-ratchet)
+                    (#:blossom #:cl-nostr.blossom)
+                    (#:nsite #:cl-nostr.nsite)))
