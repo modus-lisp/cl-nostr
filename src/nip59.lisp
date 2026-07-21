@@ -86,15 +86,30 @@ to hand to pool-publish."
     (ev:build-event eph-kp 1059 wrap-content
                     :tags (list (list "p" recipient-hex)) :created-at now)))
 
-(defun unwrap-giftwrap (recipient-sec wrap-event)
+(defun unwrap-giftwrap (recipient-sec wrap-event &key (verify t))
   "Recipient side: 1059 -> seal -> rumor.  WRAP-EVENT is a cl-nostr EVENT (as
 delivered by pool-subscribe); RECIPIENT-SEC is our secret (int/hex/bytes/keypair).
-Returns (values plaintext sender-pubkey-hex created_at)."
+Returns (values plaintext sender-pubkey-hex created_at), where SENDER-PUBKEY-HEX is
+the AUTHENTICATED sender: the key that signed the seal.
+
+When VERIFY (the default), the seal's signature is checked and the rumor's pubkey MUST
+equal the seal's signer — otherwise the sender is forgeable (an attacker seals, with
+their own key, a rumor whose pubkey names someone else, and a naive reader trusts the
+rumor's claim).  A failure signals an error (fail closed).  Pass :VERIFY NIL only when
+the caller does its own checking."
   (let* ((sec (%sec->int recipient-sec))
-         (seal (jzon:parse (nip44:nip44-decrypt sec (ev:event-pubkey wrap-event)
-                                                (ev:event-content wrap-event))))
-         (rumor (jzon:parse (nip44:nip44-decrypt sec (gethash "pubkey" seal)
-                                                 (gethash "content" seal)))))
+         (seal-json (nip44:nip44-decrypt sec (ev:event-pubkey wrap-event)
+                                         (ev:event-content wrap-event)))
+         (seal (ev:json->event seal-json))
+         (seal-pub (ev:event-pubkey seal))
+         (rumor (jzon:parse (nip44:nip44-decrypt sec seal-pub (ev:event-content seal))))
+         (rumor-pub (gethash "pubkey" rumor)))
+    (when verify
+      (unless (ev:verify-event seal)
+        (error "gift wrap: seal signature invalid — forged/altered sender ~a" seal-pub))
+      (unless (and (stringp rumor-pub) (string= rumor-pub seal-pub))
+        (error "gift wrap: rumor pubkey ~a is not the seal's signer ~a — unbound rumor"
+               rumor-pub seal-pub)))
     (values (gethash "content" rumor)
-            (gethash "pubkey" rumor)
-            (truncate (gethash "created_at" rumor)))))
+            seal-pub                                  ; the AUTHENTICATED sender
+            (truncate (or (gethash "created_at" rumor) 0)))))
