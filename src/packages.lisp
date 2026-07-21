@@ -149,6 +149,13 @@
   (:export
    #:nsite-put #:nsite-publish #:nsite-manifest))
 
+(defpackage #:cl-nostr.nip05
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-nostr.util)
+                    (#:jzon #:com.inuoe.jzon))
+  (:export
+   #:resolve #:resolve-pubkey #:nip05-address-p))
+
 ;;; A thin umbrella so REPL users get everything under one nickname.
 (defpackage #:cl-nostr
   (:use #:cl)
