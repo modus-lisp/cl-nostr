@@ -60,7 +60,7 @@
                     (#:ev #:cl-nostr.event)
                     (#:flt #:cl-nostr.filter))
   (:export
-   #:relay #:connect-relay #:relay-url #:relay-connected-p #:close-relay
+   #:relay #:connect-relay #:relay-url #:relay-connected-p #:close-relay #:relay-ping
    #:publish #:subscribe #:unsubscribe
    #:on-event #:on-eose #:on-notice #:on-ok
    #:subscription #:subscription-id))

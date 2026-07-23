@@ -100,6 +100,14 @@ ON-NOTICE, if given, is called with each NOTICE message string."
   (setf (relay-connected-p relay) nil)
   relay)
 
+(defun relay-ping (relay)
+  "Send a WebSocket ping — relays close idle sockets, so a periodic ping keeps a
+long-lived subscription alive.  A failure marks the relay disconnected (so a pool
+watcher can reconnect it)."
+  (when (relay-connected-p relay)
+    (handler-case (progn (wsd:send-ping (relay-client relay)) t)
+      (error () (setf (relay-connected-p relay) nil) nil))))
+
 ;;; ---- publish / subscribe -------------------------------------------------
 
 (defun publish (relay event &key on-ok)
