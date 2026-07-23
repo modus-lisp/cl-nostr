@@ -9,7 +9,14 @@
 
 (defstruct (pool (:constructor %make-pool))
   (relays '() :type list)
+  (subs '() :type list)          ; stored subscription specs, re-sent to a relay on reconnect
+  (verify t)                     ; TLS verification, remembered for reconnects
+  (watcher nil)                  ; keepalive + reconnect thread
   (lock (bt:make-lock "pool")))
+
+(defparameter *pool-watch-interval* 20
+  "Seconds between pool sweeps: ping live relays (relays drop idle sockets) and
+reconnect + re-subscribe any that have gone away.")
 
 (defun %connect-with-timeout (url verify on-notice timeout)
   "Connect to URL, abandoning the attempt after TIMEOUT seconds (websocket-driver's
@@ -29,7 +36,7 @@ handshake is synchronous and otherwise unbounded).  Returns the relay or NIL."
 
 (defun make-pool (&optional urls &key (verify t) (timeout 10))
   "Make a pool, connecting (in parallel) to a list of relay URLS up front."
-  (let* ((pool (%make-pool))
+  (let* ((pool (%make-pool :verify verify))
          (urls (remove nil (if (listp urls) urls (list urls))))
          (results (make-array (length urls) :initial-element nil))
          (threads (loop for url in urls for i from 0
@@ -41,6 +48,7 @@ handshake is synchronous and otherwise unbounded).  Returns the relay or NIL."
                                    :name (format nil "cl-nostr pool ~a" url))))))
     (dolist (th threads) (ignore-errors (bt:join-thread th)))
     (loop for relay across results when relay do (push relay (pool-relays pool)))
+    (%ensure-watcher pool)                 ; keepalive + auto-reconnect from here on
     pool))
 
 (defun add-relay (pool url &key (verify t) on-notice (timeout 10))
@@ -71,6 +79,43 @@ handshake is synchronous and otherwise unbounded).  Returns the relay or NIL."
 (defun %relays (pool)
   (bt:with-lock-held ((pool-lock pool)) (copy-list (pool-relays pool))))
 
+;;; ---- keepalive + reconnect -------------------------------------------------
+;;; websocket-driver never reconnects a dropped socket, and relays close idle ones,
+;;; so a long-lived subscription silently dies.  The pool watcher pings live relays
+;;; and, for any that have gone away, reconnects and re-sends the stored subscriptions.
+
+(defun %resubscribe (pool relay)
+  "Re-send every stored subscription to RELAY (after a reconnect)."
+  (dolist (spec (pool-subs pool))
+    (ignore-errors
+     (r:subscribe relay (getf spec :filters)
+                  :on-event (getf spec :dedup) :on-eose (getf spec :on-eose)))))
+
+(defun %pool-sweep (pool)
+  "One pass: ping connected relays; reconnect + re-subscribe disconnected ones.
+Reconnects happen OUTSIDE the pool lock (the handshake blocks), swapping the fresh
+relay into its cons cell in place so publish/subscribe keep seeing a live list."
+  (let ((cells (bt:with-lock-held ((pool-lock pool))
+                 (loop for cell on (pool-relays pool) collect cell))))
+    (dolist (cell cells)
+      (let ((relay (car cell)))
+        (if (r:relay-connected-p relay)
+            (r:relay-ping relay)                    ; keepalive (marks dead if the send fails)
+            (let ((fresh (%connect-with-timeout (r:relay-url relay) (pool-verify pool) nil 10)))
+              (when fresh
+                (bt:with-lock-held ((pool-lock pool)) (setf (car cell) fresh))
+                (%resubscribe pool fresh))))))))
+
+(defun %pool-watch-loop (pool)
+  (loop (sleep *pool-watch-interval*) (ignore-errors (%pool-sweep pool))))
+
+(defun %ensure-watcher (pool)
+  "Start the pool's keepalive/reconnect thread once."
+  (bt:with-lock-held ((pool-lock pool))
+    (unless (and (pool-watcher pool) (bt:thread-alive-p (pool-watcher pool)))
+      (setf (pool-watcher pool)
+            (bt:make-thread (lambda () (%pool-watch-loop pool)) :name "cl-nostr pool watcher")))))
+
 (defun pool-publish (pool event &key on-ok)
   "Publish EVENT to every connected relay.  ON-OK, if given, is called as
 (relay accepted-p message) once per relay reply."
@@ -84,16 +129,20 @@ handshake is synchronous and otherwise unbounded).  Returns the relay or NIL."
   "Subscribe across every relay, de-duplicating events by id.  ON-EVENT is called
 (event relay) once per distinct event; ON-EOSE (relay) as each relay finishes its
 stored set.  Returns the list of per-relay subscriptions."
-  (let ((seen (make-hash-table :test 'equal))
-        (seen-lock (bt:make-lock "seen")))
-    (flet ((dedup (event relay)
-             (when on-event
-               (let ((id (cl-nostr.event:event-id event)))
-                 (when (bt:with-lock-held (seen-lock)
-                         (unless (gethash id seen) (setf (gethash id seen) t)))
-                   (funcall on-event event relay))))))
-      (loop for relay in (%relays pool)
-            collect (r:subscribe relay filters :on-event #'dedup :on-eose on-eose)))))
+  (let* ((seen (make-hash-table :test 'equal))
+         (seen-lock (bt:make-lock "seen"))
+         (dedup (lambda (event relay)
+                  (when on-event
+                    (let ((id (cl-nostr.event:event-id event)))
+                      (when (bt:with-lock-held (seen-lock)
+                              (unless (gethash id seen) (setf (gethash id seen) t)))
+                        (funcall on-event event relay)))))))
+    ;; remember this subscription so the watcher can re-send it after a reconnect
+    (bt:with-lock-held ((pool-lock pool))
+      (push (list :filters filters :dedup dedup :on-eose on-eose) (pool-subs pool)))
+    (%ensure-watcher pool)
+    (loop for relay in (%relays pool)
+          collect (r:subscribe relay filters :on-event dedup :on-eose on-eose))))
 
 (defun fetch-events (pool filters &key (timeout 5) limit)
   "Collect stored events matching FILTERS from all relays, blocking until every
