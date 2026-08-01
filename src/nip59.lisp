@@ -60,15 +60,23 @@ NIP-01 serializer so it matches what any client would compute."
           (gethash "content" h) content)
     (with-output-to-string (s) (jzon:stringify h :stream s))))
 
-(defun build-giftwrap (sender-sec recipient-hex message)
+(defun build-giftwrap (sender-sec recipient-hex message &key after)
   "NIP-59: wrap MESSAGE for RECIPIENT-HEX (x-only pubkey hex) from SENDER-SEC
 (integer / hex / bytes / keypair).  Builds rumor(14) -> seal(13, by sender) ->
 gift wrap(1059, by an ephemeral key) and returns the kind-1059 cl-nostr EVENT
-to hand to pool-publish."
+to hand to pool-publish.
+
+AFTER is the created_at of the message this one answers.  A reply is stamped
+strictly later, so a conversation still reads in order when the two ends
+disagree about the time: unlike a chat server, nobody here holds an
+authoritative clock, and a reply generated within the same second as the
+question — or on a box whose clock trails the phone's by a little — otherwise
+sorts ABOVE the question in the recipient's client.  Seconds are the whole
+resolution Nostr offers, so this is not an edge case; it is most fast replies."
   (let* ((sender-int (%sec->int sender-sec))
          (sender-kp (%kp-from-int sender-int))
          (sender-pub (k:public-hex sender-kp))
-         (now (unix-now))
+         (now (if after (max (unix-now) (1+ after)) (unix-now)))
          ;; rumor: the real message, unsigned, real timestamp
          (rumor-json (%rumor-json sender-pub now 14
                                   (list (list "p" recipient-hex)) message))
