@@ -9,6 +9,7 @@
 
 (defstruct (pool (:constructor %make-pool))
   (relays '() :type list)
+  (unreachable '() :type list)   ; urls we were asked for and could not connect
   (subs '() :type list)          ; stored subscription specs, re-sent to a relay on reconnect
   (verify t)                     ; TLS verification, remembered for reconnects
   (watcher nil)                  ; keepalive + reconnect thread
@@ -47,17 +48,29 @@ handshake is synchronous and otherwise unbounded).  Returns the relay or NIL."
                                            (%connect-with-timeout url verify nil timeout)))
                                    :name (format nil "cl-nostr pool ~a" url))))))
     (dolist (th threads) (ignore-errors (bt:join-thread th)))
-    (loop for relay across results when relay do (push relay (pool-relays pool)))
+    ;; A relay that would not connect is REMEMBERED, not silently dropped.  "I published
+    ;; to three relays" and "three relays were in my config" are different claims, and a
+    ;; pool that forgets the difference cannot tell its caller which one it is making.
+    (loop for relay across results
+          for url in urls
+          do (if relay (push relay (pool-relays pool)) (push url (pool-unreachable pool))))
     (%ensure-watcher pool)                 ; keepalive + auto-reconnect from here on
     pool))
 
 (defun add-relay (pool url &key (verify t) on-notice (timeout 10))
   "Connect to URL and add it to the pool.  Returns the relay (or NIL on failure)."
   (let ((relay (%connect-with-timeout url verify on-notice timeout)))
-    (when relay
-      (bt:with-lock-held ((pool-lock pool))
-        (push relay (pool-relays pool))))
+    (bt:with-lock-held ((pool-lock pool))
+      (if relay
+          (progn (push relay (pool-relays pool))
+                 (setf (pool-unreachable pool)
+                       (remove url (pool-unreachable pool) :test #'string=)))
+          (pushnew url (pool-unreachable pool) :test #'string=)))
     relay))
+
+(defun pool-relay-urls (pool)
+  "The URLs of the relays currently connected in POOL."
+  (mapcar #'r:relay-url (%relays pool)))
 
 (defun remove-relay (pool relay-or-url)
   "Close and drop a relay (by object or url)."
@@ -70,7 +83,13 @@ handshake is synchronous and otherwise unbounded).  Returns the relay or NIL."
         (setf (pool-relays pool) (remove relay (pool-relays pool)))))))
 
 (defun close-pool (pool)
-  "Close every relay in the pool."
+  "Close every relay in the pool and stop its watcher thread.  Stopping the watcher
+matters: it loops forever, so a library call that opens a pool per request would leak
+one thread per call without this."
+  (let ((watcher (bt:with-lock-held ((pool-lock pool))
+                   (prog1 (pool-watcher pool) (setf (pool-watcher pool) nil)))))
+    (when (and watcher (bt:thread-alive-p watcher))
+      (ignore-errors (bt:destroy-thread watcher))))
   (bt:with-lock-held ((pool-lock pool))
     (mapc #'r:close-relay (pool-relays pool))
     (setf (pool-relays pool) '()))
@@ -117,13 +136,116 @@ relay into its cons cell in place so publish/subscribe keep seeing a live list."
             (bt:make-thread (lambda () (%pool-watch-loop pool)) :name "cl-nostr pool watcher")))))
 
 (defun pool-publish (pool event &key on-ok)
-  "Publish EVENT to every connected relay.  ON-OK, if given, is called as
-(relay accepted-p message) once per relay reply."
+  "Publish EVENT to every connected relay and return its id immediately.  ON-OK, if
+given, is called as (relay accepted-p message) once per relay reply.
+
+FIRE AND FORGET.  This tells you nothing about whether the event landed: a websocket
+whose socket has gone away swallows the frame without signalling, and a process that
+exits here exits before any relay has answered.  Use POOL-PUBLISH-SYNC whenever the
+answer matters."
   (dolist (relay (%relays pool) (cl-nostr.event:event-id event))
     (ignore-errors
      (r:publish relay event
                 :on-ok (when on-ok
                          (lambda (accepted msg) (funcall on-ok relay accepted msg)))))))
+
+;;; ---- publishing you can believe --------------------------------------------
+;;; The relay's OK reply is the ONLY evidence that an event was published.  A send
+;;; can vanish without a trace: websocket-driver catches its own write errors and
+;;; closes the socket, so nothing is signalled to the caller and nothing is queued.
+;;; A publisher that does not wait for OK is guessing — and a script that guesses and
+;;; then exits has lost the event.  (That is not hypothetical; it is what silently
+;;; dropped two site deployments before this function existed.)
+
+(defclass relay-ack ()
+  ((url      :initarg :url      :reader ack-url)
+   (event-id :initarg :event-id :reader ack-event-id)
+   (status   :initarg :status   :initform :no-reply :reader ack-status
+             :documentation
+             "One of :ACCEPTED (relay said OK true), :REJECTED (OK false — policy,
+paid relay, bad signature), :NO-REPLY (sent, never answered in time), :SEND-FAILED
+(the socket would not take it), :UNREACHABLE (never connected at all).")
+   (message  :initarg :message  :initform nil :reader ack-message
+             :documentation "The relay's own words, when it had any."))
+  (:documentation "What one relay did with one event.  A partial result is normal:
+relays refuse events for their own reasons and that is not the publisher's failure."))
+
+(defun ack-accepted-p (ack) (eq (ack-status ack) :accepted))
+(defun ack-replied-p (ack) (member (ack-status ack) '(:accepted :rejected)))
+
+(defmethod print-object ((a relay-ack) stream)
+  (print-unreadable-object (a stream :type t)
+    (format stream "~a ~a~@[ ~a~]" (ack-url a) (ack-status a) (ack-message a))))
+
+(defun %reconnect-cell (pool cell)
+  "Reconnect the relay in CELL (a cons in POOL-RELAYS), swapping the fresh relay into
+place so publishers and subscribers keep seeing a live list.  Returns the relay."
+  (let ((fresh (%connect-with-timeout (r:relay-url (car cell)) (pool-verify pool) nil 10)))
+    (when fresh
+      (bt:with-lock-held ((pool-lock pool)) (setf (car cell) fresh))
+      (%resubscribe pool fresh))
+    (car cell)))
+
+(defun pool-publish-sync (pool event &key (timeout 8) (retry-after 3) (retries 1))
+  "Publish EVENT to every relay and WAIT, up to TIMEOUT seconds, for each one's OK.
+Returns a list of RELAY-ACK — one per relay in the pool, plus one :UNREACHABLE ack per
+url the pool could not connect to — so the caller can see exactly what happened rather
+than a boolean.  Any relay that has not answered after RETRY-AFTER seconds is
+reconnected if its socket died and sent the event again (RETRIES times); re-sending is
+harmless because relays deduplicate by event id.
+
+Returns as soon as every relay has answered, so the common case costs one round trip."
+  (let* ((cells (bt:with-lock-held ((pool-lock pool))
+                  (loop for cell on (pool-relays pool) collect cell)))
+         (id (cl-nostr.event:event-id event))
+         (lock (bt:make-lock "publish-sync"))
+         (acks (make-hash-table :test 'equal)))
+    (dolist (cell cells)
+      (let ((url (r:relay-url (car cell))))
+        (setf (gethash url acks)
+              (make-instance 'relay-ack :url url :event-id id :status :no-reply))))
+    (labels ((note (url status &optional message)
+               (bt:with-lock-held (lock)
+                 (let ((ack (gethash url acks)))
+                   (when (and ack (not (ack-replied-p ack)))
+                     (setf (slot-value ack 'status) status
+                           (slot-value ack 'message) message)))))
+             (send (relay)
+               (let ((url (r:relay-url relay)))
+                 (handler-case
+                     (progn (r:publish relay event
+                                       :on-ok (lambda (accepted msg)
+                                                (note url (if accepted :accepted :rejected) msg)))
+                            ;; a retry that gets out clears an earlier send failure
+                            (bt:with-lock-held (lock)
+                              (let ((ack (gethash url acks)))
+                                (when (eq (ack-status ack) :send-failed)
+                                  (setf (slot-value ack 'status) :no-reply
+                                        (slot-value ack 'message) nil)))))
+                   (serious-condition (c) (note url :send-failed (princ-to-string c))))))
+             (outstanding ()
+               (remove-if (lambda (cell) (ack-replied-p (gethash (r:relay-url (car cell)) acks)))
+                          cells)))
+      (dolist (cell cells) (send (car cell)))
+      (loop with waited = 0.0 with step = 0.1 with attempts = 0
+            until (null (outstanding))
+            while (< waited timeout)
+            do (sleep step) (incf waited step)
+               (when (and retry-after (< attempts retries)
+                          (>= waited (* (1+ attempts) retry-after)))
+                 (incf attempts)
+                 (dolist (cell (outstanding))
+                   (unless (r:relay-connected-p (car cell)) (%reconnect-cell pool cell))
+                   (send (car cell)))))
+      (append (loop for cell in cells collect (gethash (r:relay-url (car cell)) acks))
+              (loop for url in (pool-unreachable pool)
+                    collect (make-instance 'relay-ack :url url :event-id id
+                                                      :status :unreachable
+                                                      :message "never connected"))))))
+
+(defun acks-accepted (acks)
+  "The subset of ACKS whose relay accepted the event."
+  (remove-if-not #'ack-accepted-p acks))
 
 (defun pool-subscribe (pool filters &key on-event on-eose)
   "Subscribe across every relay, de-duplicating events by id.  ON-EVENT is called

@@ -194,3 +194,16 @@ Returns (values kind plist) where KIND is one of
        (multiple-value-bind (id author kind relays) (naddr-decode string)
          (values :naddr (list :identifier id :author author :kind kind :relays relays))))
       (t (error "unknown nostr entity hrp: ~a" hrp)))))
+
+(defun pubkey-hex (who)
+  "The 64-hex pubkey for WHO, however it was written: a hex pubkey (returned
+lowercased), an npub, or an nprofile.  The single place that turns \"whatever the
+user pasted\" into the one form filters and events use."
+  (let ((who (string-trim '(#\Space #\Tab #\Newline #\Return) who)))
+    (cond ((and (= (length who) 64) (every (lambda (c) (digit-char-p c 16)) who))
+           (string-downcase who))
+          ((and (> (length who) 4) (string-equal "npub" (subseq who 0 4)))
+           (u:bytes->hex (npub-decode who)))
+          ((and (> (length who) 8) (string-equal "nprofile" (subseq who 0 8)))
+           (u:bytes->hex (nprofile-decode who)))
+          (t (error "not a pubkey, npub, or nprofile: ~s" who)))))

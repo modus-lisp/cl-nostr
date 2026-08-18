@@ -16,7 +16,11 @@
                     (#:k #:cl-nostr.keys)
                     (#:b #:cl-nostr.bech32)
                     (#:ev #:cl-nostr.event)
-                    (#:flt #:cl-nostr.filter))
+                    (#:flt #:cl-nostr.filter)
+                    (#:pool #:cl-nostr.pool)
+                    (#:blossom #:cl-nostr.blossom)
+                    (#:nsite #:cl-nostr.nsite)
+                    (#:bt #:bordeaux-threads))
   (:export #:run))
 
 (in-package #:cl-nostr.test)
@@ -134,6 +138,223 @@
       (check-true "filter rejects wrong kind"
                   (not (flt:filter-matches-p (flt:make-filter :kinds '(7)) event))))))
 
+;;; ---- nsite (NIP-5A): manifest construction and tag round-trips -----------
+;;; The manifest IS the site: every path a reader can reach is a tag in it, so a
+;;; path that does not survive the round trip is a page that 404s.
+
+(defparameter +hash-a+ "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4")
+(defparameter +hash-b+ "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+(defun test-nsite-manifest ()
+  (format t "~%nsite manifest (NIP-5A kind 15128):~%")
+  (let* ((kp (k:keypair-from-secret +nsec-hex+))
+         (paths (list (cons "/k30.html" +hash-a+)
+                      (cons "/index.html" +hash-a+)
+                      (cons "/style.css" +hash-b+)))
+         (servers '("https://cdn.hzrd149.com" "https://blossom.primal.net"))
+         (manifest (nsite:nsite-manifest kp paths :servers servers :title "a site"
+                                                  :description "hello")))
+    (check "manifest kind is 15128" (ev:event-kind manifest) nsite:+kind-nsite-root+)
+    (check-true "manifest is signed and verifies" (ev:verify-event manifest))
+    ;; path/hash tags round-trip: what went in is what a reader gets back out
+    (check "path tags round-trip" (nsite:manifest-paths manifest) paths)
+    (check "server tags round-trip" (nsite:manifest-servers manifest) servers)
+    (check "title round-trip" (nsite:manifest-title manifest) "a site")
+    (check "description round-trip" (nsite:manifest-description manifest) "hello")
+    ;; lookup is what a gateway does, including the directory-index rule
+    (check "lookup exact path" (nsite:manifest-lookup manifest "/style.css") +hash-b+)
+    (check "lookup relative path gets a leading slash"
+           (nsite:manifest-lookup manifest "k30.html") +hash-a+)
+    (multiple-value-bind (hash matched) (nsite:manifest-lookup manifest "/")
+      (check "lookup \"/\" falls back to the directory index" hash +hash-a+)
+      (check "lookup \"/\" reports the path it matched" matched "/index.html"))
+    (check "lookup of a path the site does not have"
+           (nsite:manifest-lookup manifest "/nope.html") nil)))
+
+(defun test-nsite-legacy ()
+  (format t "~%nsite legacy pointer (kind 34128):~%")
+  (let* ((kp (k:keypair-from-secret +nsec-hex+))
+         (event (ev:build-event kp nsite:+kind-nsite-legacy+ ""
+                                :tags (list (list "d" "/index.html") (list "x" +hash-a+)))))
+    (check "d/x tags round-trip" (nsite:legacy-pointer event) (cons "/index.html" +hash-a+))
+    (check "a kind-1 note is not a pointer"
+           (nsite:legacy-pointer (ev:build-event kp 1 "hi")) nil)))
+
+(defun test-nsite-discovery-lists ()
+  (format t "~%nsite discovery lists:~%")
+  (let* ((kp (k:keypair-from-secret +nsec-hex+))
+         (relays '("wss://relay.damus.io" "wss://nos.lol"))
+         (servers '("https://cdn.hzrd149.com")))
+    (let ((event (nsite:relay-list-event kp relays)))
+      (check "relay list is kind 10002" (ev:event-kind event) 10002)
+      (check "relay list r tags" (ev:tag-values event "r") relays))
+    (let ((event (nsite:server-list-event kp servers)))
+      (check "server list is kind 10063" (ev:event-kind event) 10063)
+      (check "server list server tags" (ev:tag-values event "server") servers))))
+
+(defun test-nsite-blob-grouping ()
+  "Blossom is content-addressed, so paths sharing bytes share ONE upload."
+  (format t "~%nsite blob grouping:~%")
+  (multiple-value-bind (paths blobs)
+      (cl-nostr.nsite::%blobs (list (cons "/a.html" "same") (cons "/b.html" "same")
+                                    (cons "/c.css" "other"))
+                              nil)
+    (check "every path is mapped" (mapcar #'car paths) '("/a.html" "/b.html" "/c.css"))
+    (check "paths with the same bytes get the same hash"
+           (equal (cdr (first paths)) (cdr (second paths))) t)
+    (check "distinct blobs, not distinct paths" (length blobs) 2)
+    (check "content type guessed from the first path naming the blob"
+           (third (first blobs)) "text/html")
+    (check "content type of the second blob" (third (second blobs)) "text/css"))
+  (multiple-value-bind (paths blobs)
+      (cl-nostr.nsite::%blobs (list (cons "/" "x")) "text/html")
+    (declare (ignore paths))
+    (check "an explicit content type overrides the guess" (third (first blobs)) "text/html")))
+
+;;; ---- partial outcomes ----------------------------------------------------
+;;; Some servers down and some relays refusing is the NORMAL case, so the report
+;;; has to distinguish "a peer declined" from "this did not get published".
+
+(defun %upload (server hash &key ok error)
+  (make-instance 'blossom:blob-upload :server server :hash hash :ok ok :error error))
+
+(defun %ack (url status &optional message)
+  (make-instance 'pool:relay-ack :url url :event-id "id" :status status :message message))
+
+(defun %report (paths uploads &optional publications)
+  (make-instance 'nsite:nsite-report :npub "npub1test" :pubkey "ff"
+                                     :paths paths :uploads uploads
+                                     :publications publications))
+
+(defun %manifest-publication (acks)
+  (make-instance 'nsite:publication
+                 :event (ev:build-event (k:keypair-from-secret +nsec-hex+)
+                                        nsite:+kind-nsite-root+ "")
+                 :acks acks))
+
+(defun test-ack-status ()
+  (format t "~%relay acks:~%")
+  (check-true "accepted counts as accepted" (pool:ack-accepted-p (%ack "wss://a" :accepted)))
+  (check-true "rejected is a reply, not an acceptance"
+              (and (pool:ack-replied-p (%ack "wss://a" :rejected))
+                   (not (pool:ack-accepted-p (%ack "wss://a" :rejected)))))
+  (dolist (status '(:no-reply :send-failed :unreachable))
+    (check-true (format nil "~a is neither a reply nor an acceptance" status)
+                (not (or (pool:ack-replied-p (%ack "wss://a" status))
+                         (pool:ack-accepted-p (%ack "wss://a" status))))))
+  (check "acks-accepted keeps only the acceptances"
+         (mapcar #'pool:ack-url
+                 (pool:acks-accepted (list (%ack "wss://a" :accepted)
+                                           (%ack "wss://b" :rejected "blocked: policy")
+                                           (%ack "wss://c" :unreachable)
+                                           (%ack "wss://d" :accepted))))
+         '("wss://a" "wss://d")))
+
+(defun test-partial-publish-report ()
+  (format t "~%partial publish outcomes:~%")
+  ;; one server took the blob, one timed out, one refused: that is a SUCCESS
+  (let ((report (%report (list (cons "/index.html" +hash-a+))
+                         (list (%upload "https://one" +hash-a+ :ok t)
+                               (%upload "https://two" +hash-a+ :error "no answer within 45 s")
+                               (%upload "https://three" +hash-a+ :error "HTTP 402"))
+                         (list (%manifest-publication
+                                (list (%ack "wss://a" :accepted)
+                                      (%ack "wss://b" :rejected "blocked: policy")
+                                      (%ack "wss://c" :unreachable)))))))
+    (check-true "one good mirror means the blob is stored" (nsite:report-stored-p report))
+    (check-true "one accepting relay means it is published" (nsite:report-published-p report))
+    (check "a partial publish reports no problems" (nsite:report-problems report) '())
+    (check-true "and is ok" (nsite:report-ok-p report))
+    (check "every server's attempt is still visible"
+           (length (nsite:report-blob-uploads report +hash-a+)) 3)
+    (check "the manifest publication is findable by kind"
+           (nsite:publication-kind (nsite:report-manifest report)) 15128)
+    (check "and names the relay that took it"
+           (mapcar #'pool:ack-url (nsite:publication-accepted (nsite:report-manifest report)))
+           '("wss://a")))
+  ;; every relay refused: nothing was published, however healthy it looked
+  (let ((report (%report (list (cons "/index.html" +hash-a+))
+                         (list (%upload "https://one" +hash-a+ :ok t))
+                         (list (%manifest-publication
+                                (list (%ack "wss://a" :rejected "blocked")
+                                      (%ack "wss://b" :no-reply)))))))
+    (check-true "zero acceptances means NOT published" (not (nsite:report-published-p report)))
+    (check "and says so" (nsite:report-problems report) '("no relay accepted the manifest")))
+  ;; no server took the blob: the manifest must not be published at all
+  (let ((report (%report (list (cons "/index.html" +hash-a+) (cons "/b.css" +hash-b+))
+                         (list (%upload "https://one" +hash-a+ :ok t)
+                               (%upload "https://one" +hash-b+ :error "HTTP 500")))))
+    (check-true "a blob no server took is not stored" (not (nsite:report-stored-p report)))
+    (check-true "even though the other blob was" (nsite:report-stored-p report +hash-a+))
+    (check "the unstored blob is named, and so is the missing manifest"
+           (nsite:report-problems report)
+           (list (format nil "no Blossom server stored ~a" (subseq +hash-b+ 0 16))
+                 "the manifest was never published"))
+    (check-true "so the publish is not ok" (not (nsite:report-ok-p report)))))
+
+(defun test-resolution-status ()
+  (format t "~%resolution status (which hop broke):~%")
+  (flet ((res (&rest args)
+           (apply #'make-instance 'nsite:nsite-resolution
+                  :npub "npub1test" :pubkey "ff" :path "/index.html" args)))
+    (check-true "ok resolves" (nsite:resolution-ok-p (res :status :ok)))
+    (dolist (status '(:no-manifest :no-path :no-blob))
+      (check-true (format nil "~a does not" status)
+                  (not (nsite:resolution-ok-p (res :status status)))))))
+
+(defun test-gateway-url ()
+  (format t "~%gateway urls:~%")
+  (check "npub + path -> a browser url"
+         (nsite:nsite-gateway-url +npub+ "/k30.html" :gateway "nsite.lol")
+         (format nil "https://~a.nsite.lol/k30.html" +npub+))
+  (check "a hex pubkey is accepted too"
+         (nsite:nsite-gateway-url +npub-hex+ "index.html" :gateway "nsite.run")
+         (format nil "https://~a.nsite.run/index.html" +npub+)))
+
+(defun test-deadline ()
+  (format t "~%deadlines (no request may be unbounded):~%")
+  (multiple-value-bind (value condition timed-out) (u:call-with-deadline 5 (lambda () 42))
+    (check "a prompt thunk returns its value" value 42)
+    (check-true "with no condition and no timeout" (and (null condition) (null timed-out))))
+  (multiple-value-bind (value condition timed-out)
+      (u:call-with-deadline 5 (lambda () (error "nope")))
+    (check-true "a signalling thunk is caught, not propagated"
+                (and (null value) condition (null timed-out))))
+  (multiple-value-bind (value condition timed-out)
+      (u:call-with-deadline 0.5 (lambda () (sleep 30) :never))
+    (check-true "a hanging thunk is abandoned on the clock"
+                (and (null value) (null condition) timed-out)))
+  (let ((results (u:call-in-parallel 3 (list (lambda () :a)
+                                             (lambda () (sleep 30) :b)
+                                             (lambda () :c)))))
+    (check "one hung thunk does not lose the others"
+           (mapcar #'first results) '(:a nil :c))
+    (check-true "and is reported as timed out" (third (second results)))))
+
+(defun test-concurrent-signing ()
+  "secp256k1-fast is not thread-safe; CL-NOSTR.KEYS serializes it.  Without that lock
+this test signals in most threads and returns INVALID signatures from the rest — the
+failure that makes a good key look like a bad one to a relay."
+  (format t "~%Concurrent signing (a pool and an uploader both fan out):~%")
+  (let ((kp (k:keypair-from-secret +nsec-hex+))
+        (bad 0) (errors 0) (signed 0)
+        (lock (bt:make-lock "test")))
+    (dotimes (round 10)
+      (let ((threads (loop repeat 4
+                           collect (bt:make-thread
+                                    (lambda ()
+                                      (handler-case
+                                          (let ((event (ev:build-event kp 1 "concurrent")))
+                                            (bt:with-lock-held (lock)
+                                              (incf signed)
+                                              (unless (ev:verify-event event) (incf bad))))
+                                        (serious-condition ()
+                                          (bt:with-lock-held (lock) (incf errors)))))))))
+        (dolist (th threads) (ignore-errors (bt:join-thread th)))))
+    (check "every concurrent signature was produced" signed 40)
+    (check "none signalled" errors 0)
+    (check "and every one verifies" bad 0)))
+
 (defun run ()
   (setf *pass* 0 *fail* 0)
   (format t "~&=== cl-nostr offline gate ===~%")
@@ -143,6 +364,16 @@
   (test-tlv-spec)
   (test-tlv)
   (test-filter)
+  (test-nsite-manifest)
+  (test-nsite-legacy)
+  (test-nsite-discovery-lists)
+  (test-nsite-blob-grouping)
+  (test-ack-status)
+  (test-partial-publish-report)
+  (test-resolution-status)
+  (test-gateway-url)
+  (test-deadline)
+  (test-concurrent-signing)
   (format t "~%=== ~d passed, ~d failed ===~%" *pass* *fail*)
   (when (plusp *fail*) (error "cl-nostr offline gate: ~d failures" *fail*))
   t)
