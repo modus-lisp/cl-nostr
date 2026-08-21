@@ -139,27 +139,36 @@ server, so one signature is valid at every server holding the same bytes."
          (hash (u:bytes->hex (u:sha256 bytes)))
          (auth (or auth (%auth-header keypair hash)))
          (url (format nil "~a/upload" (string-right-trim "/" server))))
-    (multiple-value-bind (body condition timed-out)
+    ;; seal.http, not dexador — see the note in nip05.lisp: dexador pulls cl+ssl,
+    ;; which is OpenSSL through an FFI, into a library whose whole premise is that
+    ;; the crypto is Lisp all the way down.  The per-request connect/read timeouts
+    ;; go with it; CALL-WITH-DEADLINE already bounds the whole exchange, which is
+    ;; the guarantee this function actually documents.
+    (multiple-value-bind (response condition timed-out)
         (u:call-with-deadline timeout
                              (lambda ()
-                               (dex:put url
-                                        :content bytes
-                                        :headers (list (cons "Authorization" auth)
-                                                       (cons "Content-Type" content-type))
-                                        :connect-timeout (and timeout (min 10 timeout))
-                                        :read-timeout timeout))
+                               (seal.http:request
+                                "PUT" url
+                                :body bytes
+                                :headers (list (cons "Authorization" auth)
+                                               (cons "Content-Type" content-type))))
                              :name (format nil "blossom upload ~a" server))
       (when timed-out
         (error 'blossom-error :server server :hash hash
                               :detail (format nil "no answer within ~a s" timeout)))
       (when condition
         (error 'blossom-error :server server :hash hash
-                              :status (typecase condition
-                                        (dexador.error:http-request-failed
-                                         (dexador.error:response-status condition)))
                               :detail (princ-to-string condition)))
+      ;; seal.http hands back a non-2xx as a response rather than signalling, so
+      ;; the check dexador made by raising is explicit here.
+      (unless (<= 200 (seal.http:response-status response) 299)
+        (error 'blossom-error :server server :hash hash
+                              :status (seal.http:response-status response)
+                              :detail (or (ignore-errors
+                                           (u:utf8->string (seal.http:response-body response)))
+                                          "")))
       (let ((descriptor (ignore-errors
-                         (jzon:parse (if (stringp body) body (u:utf8->string body))))))
+                         (jzon:parse (u:utf8->string (seal.http:response-body response))))))
         (values hash descriptor (blossom-url server hash))))))
 
 (defun blossom-upload-all (servers data keypair
@@ -212,21 +221,21 @@ for any URL that serves the bytes, Blossom server or nsite gateway alike."
   (multiple-value-bind (result condition timed-out seconds)
       (u:call-with-deadline timeout
                            (lambda ()
-                             (multiple-value-bind (body status)
-                                 (dex:get url :force-binary t
-                                              :connect-timeout (and timeout (min 10 timeout))
-                                              :read-timeout timeout)
-                               (list body status)))
+                             ;; seal.http rather than dexador (no FFI); it always
+                             ;; hands back octets, so :force-binary has no analogue
+                             ;; and needs none.
+                             (let ((r (seal.http:http-get url)))
+                               (list (seal.http:response-body r)
+                                     (seal.http:response-status r))))
                            :name (format nil "blossom fetch ~a" url))
     (cond
       (timed-out
        (make-instance 'blob-fetch :source url :expected expect :seconds seconds
                                   :error (format nil "no answer within ~a s" timeout)))
       (condition
+       ;; seal.http returns non-2xx as a response rather than signalling, so a
+       ;; CONDITION here is a transport failure and carries no HTTP status.
        (make-instance 'blob-fetch :source url :expected expect :seconds seconds
-                                  :status (typecase condition
-                                            (dexador.error:http-request-failed
-                                             (dexador.error:response-status condition)))
                                   :error (princ-to-string condition)))
       (t
        (destructuring-bind (body status) result
