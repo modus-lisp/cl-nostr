@@ -8,12 +8,11 @@
   :author "ynniv"
   :license "MIT"
   :depends-on ("secp256k1-fast"      ; BIP340 Schnorr + secp256k1 (event sigs + NIP-44 ECDH)
-               "seal/http"           ; HTTP over seal's TLS — no FFI (was: dexador -> cl+ssl)
+               "seal/http"           ; HTTP over seal's TLS  (was: dexador -> cl+ssl)
                "ironclad"            ; SHA-256 (event ids), HMAC/ChaCha20 (NIP-44), secure random
                "cl-base64"           ; NIP-44 payload base64
                "com.inuoe.jzon"      ; JSON: relay messages + events
-               "websocket-driver"    ; WebSocket client (wss:// relays)
-               "cl+ssl"              ; TLS for wss://
+               "seal/websocket"      ; WebSocket client (wss:// relays), on seal's TLS
                "bordeaux-threads")   ; relay read loops + pool concurrency
   :serial t
   :components

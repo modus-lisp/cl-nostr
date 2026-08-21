@@ -20,7 +20,7 @@
 reconnect + re-subscribe any that have gone away.")
 
 (defun %connect-with-timeout (url verify on-notice timeout)
-  "Connect to URL, abandoning the attempt after TIMEOUT seconds (websocket-driver's
+  "Connect to URL, abandoning the attempt after TIMEOUT seconds (seal.websocket's
 handshake is synchronous and otherwise unbounded).  Returns the relay or NIL."
   (let ((box (list nil nil)))           ; (done? . relay)
     (let ((th (bt:make-thread
@@ -99,7 +99,7 @@ one thread per call without this."
   (bt:with-lock-held ((pool-lock pool)) (copy-list (pool-relays pool))))
 
 ;;; ---- keepalive + reconnect -------------------------------------------------
-;;; websocket-driver never reconnects a dropped socket, and relays close idle ones,
+;;; Nothing reconnects a dropped socket for us, and relays close idle ones,
 ;;; so a long-lived subscription silently dies.  The pool watcher pings live relays
 ;;; and, for any that have gone away, reconnects and re-sends the stored subscriptions.
 

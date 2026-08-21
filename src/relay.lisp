@@ -11,9 +11,9 @@
 ;;;;   ["NOTICE", <msg>]             human-readable notice
 ;;;;   ["CLOSED", <subid>, <msg>]    subscription closed by the relay
 ;;;;
-;;;; websocket-driver runs a background read thread and delivers frames via the
-;;;; :message callback, so every dispatch here happens off that thread; the lock
-;;;; guards the subscription / pending-OK tables.
+;;;; seal.websocket is blocking, so each relay owns a read thread that pumps
+;;;; frames into %DISPATCH.  Every dispatch therefore happens off that thread;
+;;;; the lock guards the subscription / pending-OK tables.
 
 (in-package #:cl-nostr.relay)
 
@@ -30,6 +30,7 @@
   (subs (make-hash-table :test 'equal))     ; subid -> subscription
   (pending-ok (make-hash-table :test 'equal)) ; event-id -> (lambda (accepted msg))
   (notice-handler nil)
+  (reader nil)                              ; the thread pumping frames into %DISPATCH
   (lock (bt:make-lock "relay")))
 
 (defun %random-id ()
@@ -77,27 +78,41 @@
 
 (defun connect-relay (url &key on-notice (verify t) (timeout 10))
   "Open a relay at URL (ws:// or wss://).  Blocks until connected or errors.
-ON-NOTICE, if given, is called with each NOTICE message string."
-  (let* ((client (wsd:make-client url))
-         (relay (%make-relay :url url :client client :notice-handler on-notice)))
-    (declare (ignorable timeout))
-    (wsd:on :open client (lambda () (setf (relay-connected-p relay) t)))
-    (wsd:on :message client (lambda (text) (%dispatch relay text)))
-    (wsd:on :close client (lambda (&rest args) (declare (ignore args))
-                            (setf (relay-connected-p relay) nil)))
-    ;; start-connection completes the handshake (and fires :open) before returning.
-    (wsd:start-connection client :verify verify)
+ON-NOTICE, if given, is called with each NOTICE message string.
+
+seal.websocket is a blocking client, where websocket-driver was event-driven with
+a read thread of its own — so the thread is ours now.  That is the whole of the
+difference, and it is worth it: websocket-driver reaches cl+ssl for wss://, i.e.
+OpenSSL through an FFI, in a library whose point is that the crypto is Lisp."
+  (declare (ignorable timeout))
+  (let* ((ws (seal.websocket:connect url :verify verify))
+         (relay (%make-relay :url url :client ws :notice-handler on-notice)))
     (setf (relay-connected-p relay) t)
+    (setf (relay-reader relay)
+          (bt:make-thread
+           (lambda ()
+             (unwind-protect
+                  (loop for text = (handler-case (seal.websocket:receive-text ws)
+                                     (error () nil))
+                        while text
+                        do (handler-case (%dispatch relay text)
+                             ;; One malformed message must not take the relay down.
+                             (error () nil)))
+               (setf (relay-connected-p relay) nil)))
+           :name (format nil "cl-nostr relay ~a" url)))
     relay))
 
 (defun %send (relay string)
   (unless (relay-connected-p relay) (error "relay not connected: ~a" (relay-url relay)))
-  (wsd:send (relay-client relay) string))
+  (seal.websocket:send-text (relay-client relay) string))
 
 (defun close-relay (relay)
   "Close the relay's WebSocket."
-  (ignore-errors (wsd:close-connection (relay-client relay)))
+  (ignore-errors (seal.websocket:close-socket (relay-client relay)))
   (setf (relay-connected-p relay) nil)
+  (let ((th (relay-reader relay)))
+    (when (and th (bt:thread-alive-p th))
+      (ignore-errors (bt:join-thread th :timeout 2))))
   relay)
 
 (defun relay-ping (relay)
@@ -105,7 +120,7 @@ ON-NOTICE, if given, is called with each NOTICE message string."
 long-lived subscription alive.  A failure marks the relay disconnected (so a pool
 watcher can reconnect it)."
   (when (relay-connected-p relay)
-    (handler-case (progn (wsd:send-ping (relay-client relay)) t)
+    (handler-case (progn (seal.websocket:send-ping (relay-client relay)) t)
       (error () (setf (relay-connected-p relay) nil) nil))))
 
 ;;; ---- publish / subscribe -------------------------------------------------
