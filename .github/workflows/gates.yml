@@ -1,0 +1,29 @@
+name: gates
+on: [push, pull_request]
+
+# ONE PLATFORM ON PURPOSE — portable Common Lisp, no FFI, no platform calls.  The
+# repos that genuinely differ per platform say so in their own workflows.
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: cl-nostr
+          submodules: recursive
+
+      # cl-nostr is one repo in a workspace of them, and the suite looks for siblings
+      # beside it.  The list is the TRANSITIVE set — when it goes stale the failure is
+      # "Component X not found", which reads like a broken build rather than a missing
+      # line here.
+      - name: Sibling checkouts
+        run: |
+          for repo in secp256k1-fast; do
+            git clone --depth 1 -q https://github.com/modus-lisp/$repo.git "$repo"
+          done
+
+      - name: Install SBCL
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sbcl
+      - name: Gate suite
+        working-directory: cl-nostr
+        run: sh inspect/run-all.sh
