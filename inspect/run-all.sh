@@ -6,5 +6,6 @@ set -e
 here=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 export CL_SOURCE_REGISTRY="(:source-registry (:tree \"$here\") (:tree \"$here/..\") :inherit-configuration)"
 exec sbcl --non-interactive \
+  --eval '(require :asdf)' \
   --eval '(handler-bind ((warning (function muffle-warning))) (asdf:load-system "cl-nostr/test"))' \
   --eval '(uiop:quit (if (ignore-errors (cl-nostr.test:run)) 0 1))'
