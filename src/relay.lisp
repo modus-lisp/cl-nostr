@@ -38,10 +38,10 @@
 
 ;;; ---- message dispatch ----------------------------------------------------
 
-(defun %as-bool (x) (and x t))           ; jzon parses JSON true/false to T/NIL
+(defun %as-bool (x) (and x t))           ; json-simple parses JSON true/false to T/NIL
 
 (defun %dispatch (relay text)
-  (let ((msg (ignore-errors (com.inuoe.jzon:parse text))))
+  (let ((msg (ignore-errors (json-simple:parse text))))
     (when (and msg (vectorp msg) (plusp (length msg)))
       (let ((type (aref msg 0)))
         (cond

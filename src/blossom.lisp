@@ -168,7 +168,7 @@ server, so one signature is valid at every server holding the same bytes."
                                            (u:utf8->string (seal.http:response-body response)))
                                           "")))
       (let ((descriptor (ignore-errors
-                         (jzon:parse (u:utf8->string (seal.http:response-body response))))))
+                         (json:parse (u:utf8->string (seal.http:response-body response))))))
         (values hash descriptor (blossom-url server hash))))))
 
 (defun blossom-upload-all (servers data keypair

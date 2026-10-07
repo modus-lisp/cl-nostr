@@ -130,13 +130,13 @@ lists of strings; CONTENT is a string; CREATED-AT and KIND are integers."
 (defun %as-string (x) (if (stringp x) x (princ-to-string x)))
 
 (defun %parse-tags (jtags)
-  "jzon parses arrays to simple-vectors; normalize tags to a list of lists of strings."
+  "json-simple parses arrays to simple-vectors; normalize tags to a list of lists of strings."
   (when jtags
     (map 'list (lambda (tag) (map 'list #'%as-string tag)) jtags)))
 
 (defun json->event (json)
   "Parse a JSON object STRING (or an already-parsed hash-table) into an EVENT."
-  (let ((ht (if (stringp json) (com.inuoe.jzon:parse json) json)))
+  (let ((ht (if (stringp json) (json-simple:parse json) json)))
     (flet ((g (k) (gethash k ht)))
       (%make-event
        :id (g "id")

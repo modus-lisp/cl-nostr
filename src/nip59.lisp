@@ -58,7 +58,7 @@ NIP-01 serializer so it matches what any client would compute."
           (gethash "kind" h) kind
           (gethash "tags" h) (%tags->vec tags)
           (gethash "content" h) content)
-    (with-output-to-string (s) (jzon:stringify h :stream s))))
+    (with-output-to-string (s) (json:stringify h :stream s))))
 
 (defun build-giftwrap (sender-sec recipient-hex message &key after)
   "NIP-59: wrap MESSAGE for RECIPIENT-HEX (x-only pubkey hex) from SENDER-SEC
@@ -109,7 +109,7 @@ the caller does its own checking."
                                          (ev:event-content wrap-event)))
          (seal (ev:json->event seal-json))
          (seal-pub (ev:event-pubkey seal))
-         (rumor (jzon:parse (nip44:nip44-decrypt sec seal-pub (ev:event-content seal))))
+         (rumor (json:parse (nip44:nip44-decrypt sec seal-pub (ev:event-content seal))))
          (rumor-pub (gethash "pubkey" rumor)))
     (when verify
       (unless (ev:verify-event seal)

@@ -31,7 +31,7 @@ if the name isn't listed) plus any relays[pubkey] list.  Signals on network/HTTP
            ;; seal.http, not dexador: dexador reaches cl+ssl, which is an FFI
            ;; binding to OpenSSL, and this library exists to not need one.
            (body (seal.http:get-string url :headers '(("Accept" . "application/json"))))
-           (json (jzon:parse body))
+           (json (json:parse body))
            (names (and (hash-table-p json) (gethash "names" json)))
            (pubkey (and (hash-table-p names) (gethash name names)))
            (relays-map (and (hash-table-p json) (gethash "relays" json)))

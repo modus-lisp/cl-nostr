@@ -11,7 +11,7 @@
                "seal/http"           ; HTTP over seal's TLS  (was: dexador -> cl+ssl)
                "ironclad"            ; SHA-256 (event ids), HMAC/ChaCha20 (NIP-44), secure random
                "cl-base64"           ; NIP-44 payload base64
-               "com.inuoe.jzon"      ; JSON: relay messages + events
+               "json-simple"      ; JSON: relay messages + events
                "seal/websocket"      ; WebSocket client (wss:// relays), on seal's TLS
                "bordeaux-threads")   ; relay read loops + pool concurrency
   :serial t

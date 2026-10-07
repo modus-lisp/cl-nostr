@@ -111,7 +111,7 @@
                     (#:secp #:secp256k1-fast)
                     (#:sch #:secp256k1-fast.schnorr)
                     (#:nip44 #:cl-nostr.nip44)
-                    (#:jzon #:com.inuoe.jzon))
+                    (#:json #:json-simple))
   (:export
    #:build-giftwrap #:unwrap-giftwrap))
 
@@ -123,7 +123,7 @@
                     (#:schnorr #:secp256k1-fast.schnorr)
                     (#:nip44 #:cl-nostr.nip44)
                     (#:ic #:ironclad)
-                    (#:jzon #:com.inuoe.jzon))
+                    (#:json #:json-simple))
   (:export
    #:dr-init #:dr-send-event #:dr-receive-event
    #:dr-session #:make-public-invite #:decrypt-invite-response
@@ -145,7 +145,7 @@
                     (#:k #:cl-nostr.keys)
                     (#:ev #:cl-nostr.event)
                     (#:b64 #:cl-base64)
-                    (#:jzon #:com.inuoe.jzon))
+                    (#:json #:json-simple))
   (:export
    #:*blossom-timeout*
    #:blossom-url #:blossom-upload #:blossom-upload-all
@@ -193,7 +193,7 @@
 (defpackage #:cl-nostr.nip05
   (:use #:cl)
   (:local-nicknames (#:u #:cl-nostr.util)
-                    (#:jzon #:com.inuoe.jzon))
+                    (#:json #:json-simple))
   (:export
    #:resolve #:resolve-pubkey #:nip05-address-p))
 

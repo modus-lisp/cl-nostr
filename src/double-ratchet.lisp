@@ -66,7 +66,7 @@
 
 ;;; ------------------------------ JSON helpers ------------------------------
 
-(defun jstr (obj) (with-output-to-string (s) (jzon:stringify obj :stream s)))
+(defun jstr (obj) (with-output-to-string (s) (json:stringify obj :stream s)))
 
 (defun ht (&rest kvs)
   (let ((h (make-hash-table :test 'equal)))
@@ -205,7 +205,7 @@
 
 (defun try-dec-header (enc-header conv-key)
   "Returns the parsed header hashtable or NIL on failure."
-  (handler-case (jzon:parse (nip44:nip44-decrypt-ck enc-header conv-key))
+  (handler-case (json:parse (nip44:nip44-decrypt-ck enc-header conv-key))
     (error () nil)))
 
 (defun decrypt-header (s event-pubkey enc-header)
@@ -279,7 +279,7 @@
                (unless (and entry (gethash (jget header "number") (cdr entry)))
                  (return-from dr-receive-event nil)))))
           (let ((text (ratchet-decrypt s header content pubkey)))
-            (jzon:parse text)))
+            (json:parse text)))
       (error ()
         (restore-state s snapshot)
         nil))))
@@ -347,7 +347,7 @@
               "skipped" sk))))
 
 (defun json->dr-state (json)
-  (let* ((p (jzon:parse json))
+  (let* ((p (json:parse json))
          (sk (make-hash-table :test 'equal))
          (skp (gethash "skipped" p)))
     (when (hash-table-p skp)
@@ -394,12 +394,12 @@
   "Invite-response (kind 1059) -> (values invitee-identity invitee-session-pub owner-pub)."
   (let* ((decrypted (nip44:nip44-decrypt-ck envelope-content
                                             (ck eph-priv-int envelope-sender-pub)))
-         (inner (jzon:parse decrypted))
+         (inner (json:parse decrypted))
          (invitee-identity (gethash "pubkey" inner))
          (dh-encrypted (nip44:nip44-decrypt-ck (gethash "content" inner) shared-secret-bytes))
          (payload-str (nip44:nip44-decrypt-ck dh-encrypted
                                               (ck identity-priv-int invitee-identity)))
-         (payload (handler-case (jzon:parse payload-str) (error () nil))))
+         (payload (handler-case (json:parse payload-str) (error () nil))))
     (if (hash-table-p payload)
         (values invitee-identity (gethash "sessionKey" payload) (gethash "ownerPublicKey" payload))
         (values invitee-identity payload-str nil))))
