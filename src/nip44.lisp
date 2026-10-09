@@ -4,7 +4,7 @@
 ;;;; the encryption layer NIP-17 private DMs (and the Double Ratchet) are built
 ;;;; on.  Validated against the canonical nostr-protocol/nips
 ;;;; nip44.vectors.json.  ECDH comes from SECP256K1-FAST (secp-mul-point /
-;;;; lift-x); the HMAC / ChaCha20 / HKDF / base64 primitives are ironclad +
+;;;; lift-x); the HMAC / ChaCha20 primitives are natrium's, base64 is
 ;;;; cl-base64.
 ;;;;
 ;;;; ECDH shape:
@@ -14,27 +14,20 @@
 
 (in-package #:cl-nostr.nip44)
 
-(defun cat (&rest vs) (apply #'concatenate '(vector (unsigned-byte 8)) vs))
+(defun cat (&rest vs) (coerce (apply #'concatenate '(vector (unsigned-byte 8)) vs)
+                              '(simple-array (unsigned-byte 8) (*))))
+(defun %u8v (v) (coerce v '(simple-array (unsigned-byte 8) (*))))
 (defun u8 (n) (make-array n :element-type '(unsigned-byte 8)))
 
-(defun hmac-sha256 (key msg)
-  (let ((h (ic:make-hmac key :sha256))) (ic:update-hmac h msg) (ic:hmac-digest h)))
+(defun hmac-sha256 (key msg) (na:hmac-sha256 (%u8v key) (%u8v msg)))
 
-(defun hkdf-extract (salt ikm) (hmac-sha256 salt ikm))
+(defun hkdf-extract (salt ikm) (na:hkdf-extract #'na:hmac-sha256 32 (%u8v salt) (%u8v ikm)))
 
-(defun hkdf-expand (prk info len)
-  (let ((blocks '()) (prev (u8 0)))
-    (dotimes (i (ceiling len 32))
-      (let ((cur (hmac-sha256 prk (cat prev info (vector (1+ i))))))
-        (push cur blocks) (setf prev cur)))
-    (subseq (apply #'cat (nreverse blocks)) 0 len)))
+(defun hkdf-expand (prk info len) (na:hkdf-expand #'na:hmac-sha256 32 (%u8v prk) (%u8v info) len))
 
 (defun chacha20 (key nonce12 data)
   "Raw ChaCha20 (IETF 12-byte nonce, block counter 0)."
-  (let ((cipher (ic:make-cipher :chacha :key key :mode :stream :initialization-vector nonce12))
-        (out (u8 (length data))))
-    (ic:encrypt cipher data out)
-    out))
+  (na:chacha20 (%u8v key) (%u8v nonce12) (%u8v data) :counter 0))
 
 (defun conversation-key (privkey-int pubkey-x-bytes)
   "HKDF-extract(salt='nip44-v2', IKM = ECDH shared x).  32 bytes.
@@ -44,7 +37,7 @@ PRIVKEY-INT is our secret scalar (integer); PUBKEY-X-BYTES is the peer's
   (let* ((pt (or (sch:lift-x (secp:bytes-to-int pubkey-x-bytes))
                  (error "nip44: peer pubkey is not a valid curve point")))
          (shared-x (secp:int-to-bytes32 (secp:secp-x (secp:secp-mul-point privkey-int pt)))))
-    (hkdf-extract (ic:ascii-string-to-byte-array "nip44-v2") shared-x)))
+    (hkdf-extract (u:string->utf8 "nip44-v2") shared-x)))
 
 (defun message-keys (ck nonce32)
   (let ((k (hkdf-expand ck nonce32 76)))
@@ -67,7 +60,8 @@ PRIVKEY-INT is our secret scalar (integer); PUBKEY-X-BYTES is the peer's
 
 (defun unpad (padded)
   (let* ((len (logior (ash (aref padded 0) 8) (aref padded 1))))
-    (when (or (zerop len) (/= (length padded) (+ 2 (calc-padded-len len))))
+    (when (or (zerop len) (/= (length padded) (+ 2 (calc-padded-len len)))
+              (notevery #'zerop (subseq padded (+ 2 len))))
       (error "nip44: invalid padding"))
     (subseq padded 2 (+ 2 len))))
 
@@ -95,13 +89,17 @@ where keys are derived directly, not from priv/pub).  Random nonce."
   "Decrypt a base64 NIP-44 payload with a raw 32-byte conversation key CK."
   (when (or (zerop (length payload)) (char= (char payload 0) #\#))
     (error "nip44: unknown version"))
-  (let* ((data (b64:base64-string-to-usb8-array payload))
+  (unless (<= 132 (length payload) 87472) (error "nip44: invalid payload size"))
+  (let* ((data (%u8v (b64:base64-string-to-usb8-array payload)))
+         (_ (unless (<= 99 (length data) 65603) (error "nip44: invalid data size")))
          (nonce (subseq data 1 33))
          (ct (subseq data 33 (- (length data) 32)))
          (mac (subseq data (- (length data) 32))))
+    (declare (ignore _))
     (unless (= (aref data 0) 2) (error "nip44: unsupported version ~d" (aref data 0)))
     (multiple-value-bind (ck-key ck-nonce hmac-key) (message-keys ck nonce)
-      (unless (equalp mac (hmac-sha256 hmac-key (cat nonce ct))) (error "nip44: bad MAC"))
+      ;; constant-time comparison: the MAC is the authenticator
+      (unless (na:bytes= mac (hmac-sha256 hmac-key (cat nonce ct))) (error "nip44: bad MAC"))
       (u:utf8->string (unpad (chacha20 ck-key ck-nonce ct))))))
 
 (defun nip44-decrypt (privkey-int pubkey-hex payload)

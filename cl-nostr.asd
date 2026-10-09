@@ -9,7 +9,7 @@
   :license "MIT"
   :depends-on ("secp256k1-fast"      ; BIP340 Schnorr + secp256k1 (event sigs + NIP-44 ECDH)
                "seal/http"           ; HTTP over seal's TLS  (was: dexador -> cl+ssl)
-               "ironclad"            ; SHA-256 (event ids), HMAC/ChaCha20 (NIP-44), secure random
+               "natrium"             ; SHA-256 (event ids), HMAC/ChaCha20 (NIP-44), secure random
                "cl-base64"           ; NIP-44 payload base64
                "json-simple"      ; JSON: relay messages + events
                "seal/websocket"      ; WebSocket client (wss:// relays), on seal's TLS

@@ -131,13 +131,16 @@ bin/cl-nostr.lisp       demo: stream the live global feed, verifying each note
 
 ## Dependencies
 
-Pure SBCL + Quicklisp libs (`ironclad`, `websocket-driver`, `cl+ssl`,
-`bordeaux-threads`) plus **`secp256k1-fast`** (the crypto) and **`json-simple`**
-(JSON), which aren't on Quicklisp. Put them where ASDF can find them — sibling
+Pure SBCL + Quicklisp libs (`cl-base64`, `bordeaux-threads`) plus four
+modus-lisp siblings that aren't on Quicklisp: **`secp256k1-fast`** (Schnorr +
+ECDH), **`natrium`** (SHA-256, HMAC, HKDF, ChaCha20, secure random),
+**`seal`** (TLS, HTTP, WebSocket) and **`json-simple`** (JSON). No FFI. Put them where ASDF can find them — sibling
 checkouts work with `run-all.sh`, or symlink them in:
 
 ```sh
 ln -s /path/to/secp256k1-fast ~/quicklisp/local-projects/secp256k1-fast
+ln -s /path/to/natrium        ~/quicklisp/local-projects/natrium
+ln -s /path/to/seal           ~/quicklisp/local-projects/seal
 ln -s /path/to/json-simple    ~/quicklisp/local-projects/json-simple
 ln -s /path/to/cl-nostr       ~/quicklisp/local-projects/cl-nostr
 ```

@@ -50,11 +50,11 @@
 
 (defun sha256 (bytes)
   "SHA-256 digest (32 bytes) of a byte sequence."
-  (ironclad:digest-sequence :sha256 (coerce bytes '(vector (unsigned-byte 8)))))
+  (natrium:sha256 (coerce bytes '(simple-array (unsigned-byte 8) (*)))))
 
 (defun random-bytes (n)
   "N cryptographically-strong random bytes."
-  (ironclad:random-data n))
+  (natrium:random-bytes n))
 
 ;;; ---- deadlines -----------------------------------------------------------
 ;;; Nothing in a network client may be unbounded.  An HTTP library's read-timeout

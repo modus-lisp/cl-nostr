@@ -33,8 +33,8 @@
 
 (defun u8 (n) (make-array n :element-type '(unsigned-byte 8)))
 (defun cat (&rest vs) (apply #'concatenate '(vector (unsigned-byte 8)) vs))
-(defun hex->bytes (h) (ic:hex-string-to-byte-array h))
-(defun bytes->hex (b) (string-downcase (ic:byte-array-to-hex-string b)))
+(defun hex->bytes (h) (u:hex->bytes h))
+(defun bytes->hex (b) (u:bytes->hex b))
 (defun utf8 (s) (sb-ext:string-to-octets s :external-format :utf-8))
 
 (defun gen-priv ()
@@ -50,7 +50,8 @@
   (nip44:conversation-key priv-int (hex->bytes pub-hex)))
 
 (defun hmac-sha256 (key msg)
-  (let ((h (ic:make-hmac key :sha256))) (ic:update-hmac h msg) (ic:hmac-digest h)))
+  (na:hmac-sha256 (coerce key '(simple-array (unsigned-byte 8) (*)))
+                  (coerce msg '(simple-array (unsigned-byte 8) (*)))))
 
 (defparameter +chain-step+
   (make-array 1 :element-type '(unsigned-byte 8) :initial-element 1)
@@ -79,7 +80,7 @@
 
 (defun event-id-hex (pub created kind tags content)
   (let ((ser (jstr (vector 0 pub created kind tags content))))
-    (bytes->hex (ic:digest-sequence :sha256 (utf8 ser)))))
+    (bytes->hex (u:sha256 (utf8 ser)))))
 
 (defun sign-event (priv-int pub-hex created kind tags content)
   "Build a signed Nostr event hash-table (NIP-01)."

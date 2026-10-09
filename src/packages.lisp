@@ -96,7 +96,7 @@
   (:local-nicknames (#:u #:cl-nostr.util)
                     (#:secp #:secp256k1-fast)
                     (#:sch #:secp256k1-fast.schnorr)
-                    (#:ic #:ironclad)
+                    (#:na #:natrium)
                     (#:b64 #:cl-base64))
   (:export
    #:conversation-key #:nip44-encrypt #:nip44-decrypt
@@ -123,7 +123,7 @@
                     (#:secp #:secp256k1-fast)
                     (#:schnorr #:secp256k1-fast.schnorr)
                     (#:nip44 #:cl-nostr.nip44)
-                    (#:ic #:ironclad)
+                    (#:na #:natrium)
                     (#:json #:json-simple))
   (:export
    #:dr-init #:dr-send-event #:dr-receive-event
