@@ -113,7 +113,8 @@
                     (#:nip44 #:cl-nostr.nip44)
                     (#:json #:json-simple))
   (:export
-   #:build-giftwrap #:unwrap-giftwrap))
+   #:build-giftwrap #:unwrap-giftwrap
+   #:wrap-rumor #:unwrap-rumor))
 
 (defpackage #:cl-nostr.double-ratchet
   (:use #:cl)

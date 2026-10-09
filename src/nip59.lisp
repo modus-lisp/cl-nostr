@@ -120,3 +120,59 @@ the caller does its own checking."
     (values (gethash "content" rumor)
             seal-pub                                  ; the AUTHENTICATED sender
             (truncate (or (gethash "created_at" rumor) 0)))))
+
+;;; ---- general rumors -------------------------------------------------------
+;;;
+;;; BUILD-GIFTWRAP / UNWRAP-GIFTWRAP above are NIP-17 direct messages: the rumor
+;;; is always kind 14 and only its content comes back.  Protocols that carry
+;;; their own rumor kinds over NIP-59 (Marmot's kind-444 Welcome, for one) need
+;;; to choose the rumor's kind, tags and created_at, and need the whole rumor
+;;; back — its kind and tags are part of what the receiver must validate.
+
+(defun wrap-rumor (sender-sec recipient-hex kind content &key tags created-at)
+  "NIP-59: wrap an unsigned rumor of KIND / TAGS / CONTENT, authored by
+SENDER-SEC, for RECIPIENT-HEX.  The seal is backdated as in BUILD-GIFTWRAP; the
+rumor keeps CREATED-AT (default now).  Returns the kind-1059 EVENT."
+  (let* ((sender-int (%sec->int sender-sec))
+         (sender-kp (%kp-from-int sender-int))
+         (sender-pub (k:public-hex sender-kp))
+         (now (unix-now))
+         (rumor-json (%rumor-json sender-pub (or created-at now) kind tags content))
+         (seal-ev (ev:build-event sender-kp 13 (nip44:nip44-encrypt sender-int recipient-hex rumor-json)
+                                  :tags '() :created-at (random-past-ts)))
+         (eph-int (secp:bytes-to-int (u:random-bytes 32)))
+         (eph-kp (%kp-from-int eph-int)))
+    (ev:build-event eph-kp 1059 (nip44:nip44-encrypt eph-int recipient-hex (ev:event->json seal-ev))
+                    :tags (list (list "p" recipient-hex)) :created-at now)))
+
+(defun unwrap-rumor (recipient-sec wrap-event)
+  "Open a kind-1059 WRAP-EVENT addressed to RECIPIENT-SEC.  Returns (values
+RUMOR SEAL): RUMOR is an unsigned EVENT (id set, no sig).  Fails closed unless
+the wrap verifies and has exactly one p tag naming us, the seal is a verified
+kind 13, the rumor's pubkey is the seal's signer, and the rumor id matches its
+contents."
+  (let* ((sec (%sec->int recipient-sec))
+         (me (%pub-hex sec)))
+    (unless (and (= (ev:event-kind wrap-event) 1059) (ev:verify-event wrap-event))
+      (error "gift wrap: not a valid kind-1059 event"))
+    (let ((ps (ev:tag-values wrap-event "p")))
+      (unless (and (= (length ps) 1) (string= (first ps) me))
+        (error "gift wrap: not addressed to ~a" me)))
+    (let* ((seal (ev:json->event (nip44:nip44-decrypt sec (ev:event-pubkey wrap-event)
+                                                      (ev:event-content wrap-event))))
+           (seal-pub (ev:event-pubkey seal)))
+      (unless (and (= (ev:event-kind seal) 13) (ev:verify-event seal))
+        (error "gift wrap: seal is not a valid kind-13 event"))
+      (let* ((ht (json:parse (nip44:nip44-decrypt sec seal-pub (ev:event-content seal))))
+             (rumor (ev:json->event ht)))
+        (when (nth-value 1 (gethash "sig" ht))
+          (error "gift wrap: rumor carries a signature"))
+        (unless (and (stringp (ev:event-pubkey rumor)) (string= (ev:event-pubkey rumor) seal-pub))
+          (error "gift wrap: rumor pubkey ~a is not the seal's signer ~a" (ev:event-pubkey rumor) seal-pub))
+        (unless (and (stringp (ev:event-id rumor))
+                     (string= (ev:event-id rumor)
+                              (ev:compute-id (ev:event-pubkey rumor) (ev:event-created-at rumor)
+                                             (ev:event-kind rumor) (ev:event-tags rumor)
+                                             (ev:event-content rumor))))
+          (error "gift wrap: rumor id does not match its contents"))
+        (values rumor seal)))))

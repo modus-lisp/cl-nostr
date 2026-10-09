@@ -20,6 +20,7 @@
                     (#:pool #:cl-nostr.pool)
                     (#:blossom #:cl-nostr.blossom)
                     (#:nsite #:cl-nostr.nsite)
+                    (#:nip59 #:cl-nostr.nip59)
                     (#:bt #:bordeaux-threads))
   (:export #:run))
 
@@ -355,6 +356,28 @@ failure that makes a good key look like a bad one to a relay."
     (check "none signalled" errors 0)
     (check "and every one verifies" bad 0)))
 
+(defun test-nip59-rumor ()
+  "General NIP-59 rumors: any kind and tags survive, the receiver gets the whole
+unsigned rumor, and a wrap for someone else is refused."
+  (format t "~&~%NIP-59 general rumors:~%")
+  (let* ((alice (k:generate-keypair))
+         (bob (k:generate-keypair))
+         (wrap (nip59:wrap-rumor alice (k:public-hex bob) 444 "welcome bytes"
+                                 :tags '(("e" "00ff") ("relays" "wss://a" "wss://b"))
+                                 :created-at 1700000000)))
+    (check "wrap is kind 1059" (ev:event-kind wrap) 1059)
+    (check-true "wrap verifies" (ev:verify-event wrap))
+    (multiple-value-bind (rumor seal) (nip59:unwrap-rumor bob (ev:json->event (ev:event->json wrap)))
+      (check "rumor kind" (ev:event-kind rumor) 444)
+      (check "rumor tags" (ev:event-tags rumor) '(("e" "00ff") ("relays" "wss://a" "wss://b")))
+      (check "rumor content" (ev:event-content rumor) "welcome bytes")
+      (check "rumor created_at" (ev:event-created-at rumor) 1700000000)
+      (check "rumor author is the seal signer" (ev:event-pubkey rumor) (ev:event-pubkey seal))
+      (check "rumor author is alice" (ev:event-pubkey rumor) (k:public-hex alice))
+      (check "rumor is unsigned" (ev:event-sig rumor) nil))
+    (check-true "a wrap for bob is refused to alice"
+                (handler-case (progn (nip59:unwrap-rumor alice wrap) nil) (error () t)))))
+
 (defun run ()
   (setf *pass* 0 *fail* 0)
   (format t "~&=== cl-nostr offline gate ===~%")
@@ -374,6 +397,7 @@ failure that makes a good key look like a bad one to a relay."
   (test-gateway-url)
   (test-deadline)
   (test-concurrent-signing)
+  (test-nip59-rumor)
   (format t "~%=== ~d passed, ~d failed ===~%" *pass* *fail*)
   (when (plusp *fail*) (error "cl-nostr offline gate: ~d failures" *fail*))
   t)
