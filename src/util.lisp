@@ -41,12 +41,49 @@
 
 (defun string->utf8 (string)
   "UTF-8 encode STRING to bytes."
-  (sb-ext:string-to-octets string :external-format :utf-8))
+  #+sbcl (sb-ext:string-to-octets string :external-format :utf-8)
+  #-sbcl
+  (let ((out (make-array (* 4 (length string)) :element-type '(unsigned-byte 8)))
+        (n 0))
+    (flet ((put (b) (setf (aref out n) b) (incf n)))
+      (loop for ch across string
+            for c = (char-code ch)
+            do (cond ((< c #x80) (put c))
+                     ((< c #x800)
+                      (put (logior #xC0 (ash c -6)))
+                      (put (logior #x80 (logand c #x3F))))
+                     ((< c #x10000)
+                      (put (logior #xE0 (ash c -12)))
+                      (put (logior #x80 (logand (ash c -6) #x3F)))
+                      (put (logior #x80 (logand c #x3F))))
+                     (t
+                      (put (logior #xF0 (ash c -18)))
+                      (put (logior #x80 (logand (ash c -12) #x3F)))
+                      (put (logior #x80 (logand (ash c -6) #x3F)))
+                      (put (logior #x80 (logand c #x3F)))))))
+    (subseq out 0 n)))
 
 (defun utf8->string (bytes)
   "Decode UTF-8 BYTES to a string."
-  (sb-ext:octets-to-string (coerce bytes '(vector (unsigned-byte 8)))
-                           :external-format :utf-8))
+  #+sbcl (sb-ext:octets-to-string (coerce bytes '(vector (unsigned-byte 8)))
+                                  :external-format :utf-8)
+  #-sbcl
+  (let ((out (make-string (length bytes))) (n 0) (i 0) (len (length bytes)))
+    (flet ((cont (k) (if (< (+ i k) len) (logand (elt bytes (+ i k)) #x3F)
+                         (error "utf8->string: truncated UTF-8 sequence"))))
+      (loop while (< i len)
+            do (let* ((b (elt bytes i))
+                      (k (cond ((< b #x80) 0) ((< b #xE0) 1) ((< b #xF0) 2) (t 3)))
+                      (c (case k
+                           (0 b)
+                           (1 (logior (ash (logand b #x1F) 6) (cont 1)))
+                           (2 (logior (ash (logand b #x0F) 12) (ash (cont 1) 6) (cont 2)))
+                           (t (logior (ash (logand b #x07) 18) (ash (cont 1) 12)
+                                      (ash (cont 2) 6) (cont 3))))))
+                 (setf (char out n) (code-char c))
+                 (incf n)
+                 (incf i (1+ k)))))
+    (subseq out 0 n)))
 
 (defun sha256 (bytes)
   "SHA-256 digest (32 bytes) of a byte sequence."

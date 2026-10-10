@@ -35,7 +35,7 @@
 (defun cat (&rest vs) (apply #'concatenate '(vector (unsigned-byte 8)) vs))
 (defun hex->bytes (h) (u:hex->bytes h))
 (defun bytes->hex (b) (u:bytes->hex b))
-(defun utf8 (s) (sb-ext:string-to-octets s :external-format :utf-8))
+(defun utf8 (s) (u:string->utf8 s))
 
 (defun gen-priv ()
   "Random secp256k1 secret key as an integer."
