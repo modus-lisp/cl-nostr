@@ -21,7 +21,12 @@ reconnect + re-subscribe any that have gone away.")
 
 (defun %connect-with-timeout (url verify on-notice timeout)
   "Connect to URL, abandoning the attempt after TIMEOUT seconds (seal.websocket's
-handshake is synchronous and otherwise unbounded).  Returns the relay or NIL."
+handshake is synchronous and otherwise unbounded).  Returns the relay or NIL.
+On modus on THIS thread, the relay's owner: seal bounds each read of the
+handshake by TIMEOUT there."
+  #+(and modus seal-readiness)
+  (ignore-errors (r:connect-relay url :verify verify :on-notice on-notice :timeout timeout))
+  #-(and modus seal-readiness)
   (let ((box (list nil nil)))           ; (done? . relay)
     (let ((th (bt:make-thread
                (lambda ()
@@ -40,6 +45,10 @@ handshake is synchronous and otherwise unbounded).  Returns the relay or NIL."
   (let* ((pool (%make-pool :verify verify))
          (urls (remove nil (if (listp urls) urls (list urls))))
          (results (make-array (length urls) :initial-element nil))
+         #+(and modus seal-readiness)
+         (threads (loop for url in urls for i from 0
+                        do (setf (aref results i) (%connect-with-timeout url verify nil timeout))))
+         #-(and modus seal-readiness)
          (threads (loop for url in urls for i from 0
                         collect (let ((i i) (url url))
                                   (bt:make-thread
@@ -47,7 +56,9 @@ handshake is synchronous and otherwise unbounded).  Returns the relay or NIL."
                                      (setf (aref results i)
                                            (%connect-with-timeout url verify nil timeout)))
                                    :name (format nil "cl-nostr pool ~a" url))))))
+    #-(and modus seal-readiness)
     (dolist (th threads) (ignore-errors (bt:join-thread th)))
+    #+(and modus seal-readiness) threads
     ;; A relay that would not connect is REMEMBERED, not silently dropped.  "I published
     ;; to three relays" and "three relays were in my config" are different claims, and a
     ;; pool that forgets the difference cannot tell its caller which one it is making.
@@ -88,6 +99,9 @@ matters: it loops forever, so a library call that opens a pool per request would
 one thread per call without this."
   (let ((watcher (bt:with-lock-held ((pool-lock pool))
                    (prog1 (pool-watcher pool) (setf (pool-watcher pool) nil)))))
+    #+(and modus seal-readiness)
+    (when watcher (setf r:*pump-hooks* (remove watcher r:*pump-hooks*)))
+    #-(and modus seal-readiness)
     (when (and watcher (bt:thread-alive-p watcher))
       (ignore-errors (bt:destroy-thread watcher))))
   (bt:with-lock-held ((pool-lock pool))
@@ -129,7 +143,21 @@ relay into its cons cell in place so publish/subscribe keep seeing a live list."
   (loop (sleep *pool-watch-interval*) (ignore-errors (%pool-sweep pool))))
 
 (defun %ensure-watcher (pool)
-  "Start the pool's keepalive/reconnect thread once."
+  "Start the pool's keepalive/reconnect thread once.  On modus there is no thread:
+the sweep runs from PUMP, every *POOL-WATCH-INTERVAL* seconds."
+  #+(and modus seal-readiness)
+  (bt:with-lock-held ((pool-lock pool))
+    (unless (pool-watcher pool)
+      (let* ((next (+ (get-internal-real-time)
+                      (* *pool-watch-interval* internal-time-units-per-second)))
+             (hook (lambda ()
+                     (when (>= (get-internal-real-time) next)
+                       (setf next (+ (get-internal-real-time)
+                                     (* *pool-watch-interval* internal-time-units-per-second)))
+                       (ignore-errors (%pool-sweep pool))))))
+        (setf (pool-watcher pool) hook)
+        (push hook r:*pump-hooks*))))
+  #-(and modus seal-readiness)
   (bt:with-lock-held ((pool-lock pool))
     (unless (and (pool-watcher pool) (bt:thread-alive-p (pool-watcher pool)))
       (setf (pool-watcher pool)
@@ -230,7 +258,7 @@ Returns as soon as every relay has answered, so the common case costs one round 
       (loop with waited = 0.0 with step = 0.1 with attempts = 0
             until (null (outstanding))
             while (< waited timeout)
-            do (sleep step) (incf waited step)
+            do (u:wait-step step) (incf waited step)
                (when (and retry-after (< attempts retries)
                           (>= waited (* (1+ attempts) retry-after)))
                  (incf attempts)

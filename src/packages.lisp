@@ -11,7 +11,9 @@
    #:bytes->hex #:hex->bytes #:string->utf8 #:utf8->string
    #:sha256 #:random-bytes #:octets #:->bytes32
    ;; bounded work: nothing in a network client may be unbounded
-   #:call-with-deadline #:with-deadline #:call-in-parallel))
+   #:call-with-deadline #:with-deadline #:call-in-parallel
+   ;; waiting while something else delivers: a sleep, or a pump (see WAIT-STEP)
+   #:wait-step))
 
 (defpackage #:cl-nostr.keys
   (:use #:cl)
@@ -67,6 +69,7 @@
                     (#:flt #:cl-nostr.filter))
   (:export
    #:relay #:connect-relay #:relay-url #:relay-connected-p #:close-relay #:relay-ping
+   #:pump #:*pump-hooks*
    #:publish #:subscribe #:unsubscribe
    #:on-event #:on-eose #:on-notice #:on-ok
    #:subscription #:subscription-id))

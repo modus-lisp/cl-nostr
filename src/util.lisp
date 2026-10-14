@@ -99,6 +99,46 @@
 ;;; never trips it, and the call never returns.  So the only reliable bound is an
 ;;; outside one — run the work in its own thread and abandon it on the clock.
 
+;;; ---- waiting -------------------------------------------------------------
+;;; Every loop below that waits for something another party will deliver calls
+;;; WAIT-STEP rather than SLEEP.  Where each relay has a reader thread (SBCL),
+;;; delivery happens by itself and waiting is sleeping.  Where it cannot -- modus,
+;;; whose threads share no state, so a relay's connection belongs to the one
+;;; thread that drives it -- cl-nostr.relay installs its PUMP here, and waiting
+;;; is servicing the relays.
+
+(defvar *pump* nil
+  "A function of SECONDS that services connections for that long, or NIL to sleep.")
+
+(defun wait-step (seconds)
+  "Wait SECONDS while whatever is being waited for is delivered."
+  (if *pump* (funcall *pump* seconds) (sleep seconds)))
+
+#+modus
+(progn
+  ;; MODUS: a thread's objects belong to it, and storing one where another thread
+  ;; can see it is refused -- so the worker cannot fill in a shared BOX.  It hands
+  ;; its result back as its RETURN VALUE, which JOIN-THREAD copies across.  A
+  ;; condition comes back as its text.  A thread modus cannot stop (it has no
+  ;; TERMINATE-THREAD) runs on after its deadline; only its answer is abandoned.
+  (defun %deadline-run (thunk)
+    (let ((began (get-internal-real-time)))
+      (flet ((elapsed () (/ (float (- (get-internal-real-time) began))
+                            internal-time-units-per-second)))
+        (handler-case (list :ok (funcall thunk) (elapsed))
+          (serious-condition (c)
+            (list :err (or (ignore-errors (princ-to-string c)) "an error") (elapsed)))))))
+
+  (defun %deadline-unpack (thread)
+    "(VALUE CONDITION ELAPSED) from a finished THREAD running %DEADLINE-RUN."
+    (let ((r (handler-case (bt:join-thread thread)
+               (error (e) (list :err (or (ignore-errors (princ-to-string e)) "an error") 0.0)))))
+      (if (eq (first r) :ok)
+          (list (second r) nil (third r))
+          (list nil (make-condition 'simple-error :format-control "~a"
+                                                  :format-arguments (list (second r)))
+                (third r))))))
+
 (defun call-with-deadline (seconds thunk &key (name "cl-nostr deadline"))
   "Call THUNK, giving up after SECONDS (NIL = no deadline).  Returns four values:
 THUNK's primary value, the SERIOUS-CONDITION it signalled (or NIL), T if it ran out
@@ -110,6 +150,17 @@ of time, and the elapsed seconds.  Never signals: a caller inspects the values."
       (if (null seconds)
           (handler-case (values (funcall thunk) nil nil (elapsed))
             (serious-condition (c) (values nil c nil (elapsed))))
+          #+modus
+          (let ((thread (bt:make-thread (lambda () (%deadline-run thunk)) :name name)))
+            (loop with waited = 0.0 with step = 0.05
+                  while (bt:thread-alive-p thread) while (< waited seconds)
+                  do (wait-step step) (incf waited step))
+            (if (bt:thread-alive-p thread)
+                (values nil nil t (elapsed))
+                (destructuring-bind (value condition ran) (%deadline-unpack thread)
+                  (declare (ignore ran))
+                  (values value condition nil (elapsed)))))
+          #-modus
           (let* ((box (list nil nil nil))   ; (done value condition)
                  (thread (bt:make-thread
                           (lambda ()
@@ -120,7 +171,7 @@ of time, and the elapsed seconds.  Never signals: a caller inspects the values."
                           :name name)))
             (loop with waited = 0.0 with step = 0.05
                   until (first box) while (< waited seconds)
-                  do (sleep step) (incf waited step))
+                  do (wait-step step) (incf waited step))
             (cond ((first box) (values (second box) (third box) nil (elapsed)))
                   (t (ignore-errors (bt:destroy-thread thread))
                      (values nil nil t (elapsed)))))))))
@@ -129,6 +180,26 @@ of time, and the elapsed seconds.  Never signals: a caller inspects the values."
   "Run BODY under CALL-WITH-DEADLINE; see it for the four returned values."
   `(call-with-deadline ,seconds (lambda () ,@body) :name ,name))
 
+#+modus
+(defun call-in-parallel (seconds thunks &key (name "cl-nostr parallel"))
+  "See the portable definition below: the same contract, the results returned by
+each thread rather than written into shared boxes."
+  (let* ((start (get-internal-real-time))
+         (threads (loop for thunk in thunks for i from 0
+                        collect (let ((thunk thunk))
+                                  (bt:make-thread (lambda () (%deadline-run thunk))
+                                                  :name (format nil "~a ~d" name i))))))
+    (loop with waited = 0.0 with step = 0.05
+          while (some #'bt:thread-alive-p threads) while (< waited (or seconds 0))
+          do (wait-step step) (incf waited step))
+    (loop for thread in threads
+          collect (if (bt:thread-alive-p thread)
+                      (list nil nil t (/ (float (- (get-internal-real-time) start))
+                                         internal-time-units-per-second))
+                      (destructuring-bind (value condition ran) (%deadline-unpack thread)
+                        (list value condition nil ran))))))
+
+#-modus
 (defun call-in-parallel (seconds thunks &key (name "cl-nostr parallel"))
   "Run every thunk in THUNKS at once, each in its own thread, waiting at most
 SECONDS for the slowest and abandoning the rest.  Returns one
@@ -152,7 +223,7 @@ SECONDS for the slowest and abandoning the rest.  Returns one
                                    :name (format nil "~a ~d" name i))))))
     (loop with waited = 0.0 with step = 0.05
           until (every #'first boxes) while (< waited (or seconds 0))
-          do (sleep step) (incf waited step))
+          do (wait-step step) (incf waited step))
     (loop for box in boxes
           for thread in threads
           unless (first box)
