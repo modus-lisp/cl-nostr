@@ -322,6 +322,14 @@ LIMIT caps the returned count."
                         collect (cons relay (r:subscribe relay filters
                                                          :on-event #'collect
                                                          :on-eose #'eosed)))))
+        ;; On modus no reader thread delivers: the events arrive only while the
+        ;; relays are PUMPED, so wait by pumping (WAIT-STEP) rather than on the
+        ;; condition variable, which nothing would ever signal.
+        #+(and modus seal-readiness)
+        (let ((end (+ (get-internal-real-time) (round (* timeout internal-time-units-per-second)))))
+          (loop until (or (>= eose n) (>= (get-internal-real-time) end))
+                do (u:wait-step 0.05)))
+        #-(and modus seal-readiness)
         (bt:with-lock-held (lock)
           (loop until (>= eose n)
                 do (unless (bt:condition-wait done lock :timeout timeout)
