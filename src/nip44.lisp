@@ -2,15 +2,16 @@
 ;;;;
 ;;;; secp256k1 ECDH -> HKDF-SHA256 -> ChaCha20 + HMAC-SHA256, base64.  This is
 ;;;; the encryption layer NIP-17 private DMs (and the Double Ratchet) are built
-;;;; on.  Validated against the canonical nostr-protocol/nips
-;;;; nip44.vectors.json.  ECDH comes from SECP256K1-FAST (secp-mul-point /
-;;;; lift-x); the HMAC / ChaCha20 primitives are natrium's, base64 is
-;;;; cl-base64.
+;;;; on, and the one the UDP datagrams carry in raw form.  Validated against the
+;;;; canonical nostr-protocol/nips nip44.vectors.json (inspect/offline-test.lisp).
+;;;; ECDH comes from SECP256K1-FAST (ct-mul-point / lift-x); the HMAC / ChaCha20
+;;;; primitives are natrium's, base64 is cl-base64.
 ;;;;
 ;;;; ECDH shape:
 ;;;;   shared secret = x-coordinate of  privkey * lift_x(peer-x-only-pubkey)
-;;;;                 = (secp:secp-x (secp:secp-mul-point priv (sch:lift-x x)))
+;;;;                 = (secp:secp-x (secp:ct-mul-point priv (sch:lift-x x)))
 ;;;; lift-x lifts the x-only pubkey to its even-Y point; we take the product's x.
+;;;; The multiplier is a secret scalar, so the constant-time multiply is used.
 
 (in-package #:cl-nostr.nip44)
 
@@ -36,7 +37,7 @@ PRIVKEY-INT is our secret scalar (integer); PUBKEY-X-BYTES is the peer's
   (secp:secp-init)
   (let* ((pt (or (sch:lift-x (secp:bytes-to-int pubkey-x-bytes))
                  (error "nip44: peer pubkey is not a valid curve point")))
-         (shared-x (secp:int-to-bytes32 (secp:secp-x (secp:secp-mul-point privkey-int pt)))))
+         (shared-x (secp:int-to-bytes32 (secp:secp-x (secp:ct-mul-point privkey-int pt)))))
     (hkdf-extract (u:string->utf8 "nip44-v2") shared-x)))
 
 (defun message-keys (ck nonce32)
@@ -65,13 +66,18 @@ PRIVKEY-INT is our secret scalar (integer); PUBKEY-X-BYTES is the peer's
       (error "nip44: invalid padding"))
     (subseq padded 2 (+ 2 len))))
 
-(defun nip44-encrypt-with-nonce (plaintext-bytes ck nonce32)
-  "The deterministic core: encrypt PLAINTEXT-BYTES under conversation key CK with
-an explicit 32-byte NONCE32.  Returns the base64 NIP-44 payload."
+(defun nip44-encrypt-octets-with-nonce (plaintext-bytes ck nonce32)
+  "The deterministic core: encrypt PLAINTEXT-BYTES under conversation key CK with an
+explicit 32-byte NONCE32.  Returns the raw NIP-44 v2 payload -- version byte, nonce,
+ciphertext, MAC -- which is what a UDP datagram carries after the ephemeral key."
   (multiple-value-bind (ck-key ck-nonce hmac-key) (message-keys ck nonce32)
     (let* ((ciphertext (chacha20 ck-key ck-nonce (pad plaintext-bytes)))
            (mac (hmac-sha256 hmac-key (cat nonce32 ciphertext))))
-      (b64:usb8-array-to-base64-string (cat (vector 2) nonce32 ciphertext mac)))))
+      (cat (vector 2) nonce32 ciphertext mac))))
+
+(defun nip44-encrypt-with-nonce (plaintext-bytes ck nonce32)
+  "The same payload as NIP44-ENCRYPT-OCTETS-WITH-NONCE, base64 encoded."
+  (b64:usb8-array-to-base64-string (nip44-encrypt-octets-with-nonce plaintext-bytes ck nonce32)))
 
 (defun nip44-encrypt (privkey-int pubkey-hex plaintext)
   "Encrypt a UTF-8 string to PUBKEY-HEX (x-only).  Returns base64 payload."
@@ -85,22 +91,26 @@ nostr-tools' nip44.encrypt(plaintext, key) takes — used by the double ratchet,
 where keys are derived directly, not from priv/pub).  Random nonce."
   (nip44-encrypt-with-nonce (u:string->utf8 plaintext) ck (u:random-bytes 32)))
 
+(defun nip44-decrypt-octets (ck data)
+  "Decrypt a raw NIP-44 v2 payload DATA (version byte first) under conversation key CK.
+Returns the plaintext octets.  Signals on any size, version, MAC or padding failure;
+the MAC is checked before anything is decrypted."
+  (unless (<= 99 (length data) 65603) (error "nip44: invalid data size"))
+  (unless (= (aref data 0) 2) (error "nip44: unsupported version ~d" (aref data 0)))
+  (let* ((nonce (subseq data 1 33))
+         (ct (subseq data 33 (- (length data) 32)))
+         (mac (subseq data (- (length data) 32))))
+    (multiple-value-bind (ck-key ck-nonce hmac-key) (message-keys ck nonce)
+      ;; constant-time comparison: the MAC is the authenticator
+      (unless (na:bytes= mac (hmac-sha256 hmac-key (cat nonce ct))) (error "nip44: bad MAC"))
+      (unpad (chacha20 ck-key ck-nonce ct)))))
+
 (defun nip44-decrypt-ck (payload ck)
   "Decrypt a base64 NIP-44 payload with a raw 32-byte conversation key CK."
   (when (or (zerop (length payload)) (char= (char payload 0) #\#))
     (error "nip44: unknown version"))
   (unless (<= 132 (length payload) 87472) (error "nip44: invalid payload size"))
-  (let* ((data (%u8v (b64:base64-string-to-usb8-array payload)))
-         (_ (unless (<= 99 (length data) 65603) (error "nip44: invalid data size")))
-         (nonce (subseq data 1 33))
-         (ct (subseq data 33 (- (length data) 32)))
-         (mac (subseq data (- (length data) 32))))
-    (declare (ignore _))
-    (unless (= (aref data 0) 2) (error "nip44: unsupported version ~d" (aref data 0)))
-    (multiple-value-bind (ck-key ck-nonce hmac-key) (message-keys ck nonce)
-      ;; constant-time comparison: the MAC is the authenticator
-      (unless (na:bytes= mac (hmac-sha256 hmac-key (cat nonce ct))) (error "nip44: bad MAC"))
-      (u:utf8->string (unpad (chacha20 ck-key ck-nonce ct))))))
+  (u:utf8->string (nip44-decrypt-octets ck (%u8v (b64:base64-string-to-usb8-array payload)))))
 
 (defun nip44-decrypt (privkey-int pubkey-hex payload)
   "Decrypt a base64 NIP-44 payload from PUBKEY-HEX.  Returns the UTF-8 string."

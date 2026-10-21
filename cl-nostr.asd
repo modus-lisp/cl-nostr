@@ -13,7 +13,8 @@
                "cl-base64"           ; NIP-44 payload base64
                "json-simple"      ; JSON: relay messages + events
                "seal/websocket"      ; WebSocket client (wss:// relays), on seal's TLS
-               "bordeaux-threads")   ; relay read loops + pool concurrency
+               "bordeaux-threads"    ; relay read loops + pool concurrency
+               "cl-transport/sockets") ; UDP datagrams (publish-datagram); SBCL and modus
   :serial t
   :components
   ((:module "src"
@@ -26,7 +27,8 @@
      (:file "event")      ; NIP-01 event: canonical serialization, id, sign, verify, JSON
      (:file "filter")     ; NIP-01 subscription filters
      (:file "relay")      ; one relay: websocket connect, REQ/EVENT/CLOSE, message dispatch
-     (:file "pool")       ; high-level multi-relay client: publish + subscribe across relays
+     (:file "udp")        ; one event as one UDP datagram, sent and not answered
+     (:file "pool")     ; high-level multi-relay client: publish + subscribe across relays
      (:file "nip44")      ; NIP-44 v2 payload encryption (ECDH -> HKDF -> ChaCha20 + HMAC)
      (:file "nip59")      ; NIP-59 gift wrap / NIP-17 private DMs (rumor -> seal -> wrap)
      (:file "double-ratchet") ; Nostr Double Ratchet (yakihonne "Secure DMs", kind-1060)
