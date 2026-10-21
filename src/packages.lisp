@@ -101,7 +101,19 @@
   (:export
    #:conversation-key #:nip44-encrypt #:nip44-decrypt
    #:nip44-encrypt-with-nonce #:nip44-encrypt-ck #:nip44-decrypt-ck
+   #:nip44-encrypt-octets-with-nonce #:nip44-decrypt-octets
    #:calc-padded-len))
+
+(defpackage #:cl-nostr.udp
+  (:use #:cl)
+  (:local-nicknames (#:u #:cl-nostr.util)
+                    (#:ev #:cl-nostr.event)
+                    (#:k #:cl-nostr.keys)
+                    (#:nip44 #:cl-nostr.nip44))
+  (:export
+   #:+max-datagram+ #:datagram-too-large #:datagram-size
+   #:event->datagram #:publish-datagram
+   #:encrypt-datagram #:encrypted-datagram #:publish-datagram-encrypted #:open-datagram))
 
 (defpackage #:cl-nostr.nip59
   (:use #:cl)
@@ -207,6 +219,7 @@
                     (#:event #:cl-nostr.event)
                     (#:filter #:cl-nostr.filter)
                     (#:relay #:cl-nostr.relay)
+                    (#:udp #:cl-nostr.udp)
                     (#:pool #:cl-nostr.pool)
                     (#:nip44 #:cl-nostr.nip44)
                     (#:nip59 #:cl-nostr.nip59)

@@ -21,6 +21,8 @@
                     (#:blossom #:cl-nostr.blossom)
                     (#:nsite #:cl-nostr.nsite)
                     (#:nip59 #:cl-nostr.nip59)
+                    (#:udp #:cl-nostr.udp)
+                    (#:nip44 #:cl-nostr.nip44)
                     (#:bt #:bordeaux-threads))
   (:export #:run))
 
@@ -378,6 +380,175 @@ unsigned rumor, and a wrap for someone else is refused."
     (check-true "a wrap for bob is refused to alice"
                 (handler-case (progn (nip59:unwrap-rumor alice wrap) nil) (error () t)))))
 
+(defun be-int (octets)
+  (reduce (lambda (acc b) (+ (ash acc 8) b)) octets :initial-value 0))
+
+(defun nip44-section (section &optional (kind "valid"))
+  "A section of the official NIP-44 v2 vectors (inspect/nip44.vectors.json)."
+  (let ((root (json-simple:parse (uiop:read-file-string
+                                  (asdf:system-relative-pathname "cl-nostr" "inspect/nip44.vectors.json")))))
+    (gethash section (gethash kind (gethash "v2" root)))))
+
+(defun test-nip44-vectors ()
+  "NIP-44 v2 against the official vectors, both directions: padding, conversation and
+message keys, encryptions byte-exact under the vector's own nonce, long messages by hash,
+the lengths that must be refused, and the payloads that must be refused."
+  (format t "~&-- NIP-44 v2, official vectors --~%")
+  (let ((pads (nip44-section "calc_padded_len")))
+    (check-true (format nil "padded lengths (~d)" (length pads))
+                (every (lambda (p) (= (aref p 1) (nip44:calc-padded-len (aref p 0)))) pads)))
+  (let ((rows (nip44-section "get_conversation_key")))
+    (check-true (format nil "conversation keys (~d)" (length rows))
+                (every (lambda (r)
+                         (equalp (nip44:conversation-key (be-int (u:hex->bytes (gethash "sec1" r)))
+                                                         (u:hex->bytes (gethash "pub2" r)))
+                                 (u:hex->bytes (gethash "conversation_key" r))))
+                       rows)))
+  (let* ((section (nip44-section "get_message_keys"))
+         (ck (u:hex->bytes (gethash "conversation_key" section)))
+         (keys (gethash "keys" section)))
+    (check-true (format nil "message keys (~d)" (length keys))
+                (every (lambda (k)
+                         (multiple-value-bind (ck-key ck-nonce hmac-key)
+                             (nip44::message-keys ck (u:hex->bytes (gethash "nonce" k)))
+                           (and (equalp ck-key (u:hex->bytes (gethash "chacha_key" k)))
+                                (equalp ck-nonce (u:hex->bytes (gethash "chacha_nonce" k)))
+                                (equalp hmac-key (u:hex->bytes (gethash "hmac_key" k))))))
+                       keys)))
+  (let ((rows (nip44-section "encrypt_decrypt")))
+    (check-true (format nil "encryptions, byte-exact under the vector nonce (~d)" (length rows))
+                (every (lambda (r)
+                         (string= (nip44:nip44-encrypt-with-nonce
+                                   (u:string->utf8 (gethash "plaintext" r))
+                                   (u:hex->bytes (gethash "conversation_key" r))
+                                   (u:hex->bytes (gethash "nonce" r)))
+                                  (gethash "payload" r)))
+                       rows))
+    (check-true "and they decrypt"
+                (every (lambda (r)
+                         (string= (nip44:nip44-decrypt-ck (gethash "payload" r)
+                                                          (u:hex->bytes (gethash "conversation_key" r)))
+                                  (gethash "plaintext" r)))
+                       rows)))
+  (let ((long (nip44-section "encrypt_decrypt_long_msg")))
+    (check-true (format nil "long messages, by hash (~d)" (length long))
+                (every (lambda (r)
+                         (let* ((pattern (gethash "pattern" r))
+                                (text (with-output-to-string (out)
+                                        (dotimes (i (gethash "repeat" r)) (write-string pattern out))))
+                                (plain (u:string->utf8 text))
+                                (payload (nip44:nip44-encrypt-with-nonce
+                                          plain (u:hex->bytes (gethash "conversation_key" r))
+                                          (u:hex->bytes (gethash "nonce" r)))))
+                           (and (string= (u:bytes->hex (u:sha256 plain)) (gethash "plaintext_sha256" r))
+                                (string= (u:bytes->hex (u:sha256 (u:string->utf8 payload)))
+                                         (gethash "payload_sha256" r)))))
+                       long)))
+  (let ((lengths (nip44-section "encrypt_msg_lengths" "invalid")))
+    (check-true (format nil "lengths out of range refused (~d)" (length lengths))
+                (every (lambda (n)
+                         (handler-case (progn (nip44:nip44-encrypt-with-nonce
+                                               (make-array n :element-type '(unsigned-byte 8)
+                                                             :initial-element 65)
+                                               (make-array 32 :element-type '(unsigned-byte 8) :initial-element 0)
+                                               (u:random-bytes 32))
+                                              nil)
+                           (error () t)))
+                       lengths)))
+  (let ((rows (nip44-section "decrypt" "invalid")))
+    (check-true (format nil "all ~d invalid payloads refused" (length rows))
+                (every (lambda (r)
+                         (handler-case (progn (nip44:nip44-decrypt-ck (gethash "payload" r)
+                                                                      (u:hex->bytes (gethash "conversation_key" r)))
+                                              nil)
+                           (error () t)))
+                       rows))))
+
+(defun test-udp-encrypted ()
+  "The encrypted datagram: opened by the relay to the same event, unreadable to anyone
+else, refused when altered, and delivered over a real loopback socket."
+  (format t "~&-- UDP datagrams, NIP-44 encrypted --~%")
+  (let* ((relay (k:generate-keypair))
+         (pub (k:public-hex relay))
+         (kp (k:generate-keypair))
+         (ev (ev:build-event kp 1 (format nil "sealed ☃ ~a" (code-char #x1F600))))
+         (octets (udp:encrypted-datagram ev pub)))
+    (check-true "encrypted datagram fits one unfragmented frame"
+                (<= (length octets) udp:+max-datagram+))
+    (check "the relay opens it to the same event"
+           (ev:event-id (ev:json->event (u:utf8->string (udp:open-datagram relay octets))))
+           (ev:event-id ev))
+    (check-true "the opened event verifies"
+                (ev:valid-event-p (ev:json->event (u:utf8->string (udp:open-datagram relay octets)))))
+    (check-true "the content is not in the clear"
+                (not (search (u:string->utf8 "sealed") octets)))
+    (check-true "another key cannot open it"
+                (handler-case (progn (udp:open-datagram (k:generate-keypair) octets) nil)
+                  (error () t)))
+    (check-true "an altered datagram is refused"
+                (handler-case (let ((bad (copy-seq octets)))
+                                (setf (aref bad (1- (length bad))) (logxor 1 (aref bad (1- (length bad)))))
+                                (udp:open-datagram relay bad)
+                                nil)
+                  (error () t)))
+    (check-true "an event past the bound is refused"
+                (handler-case (progn (udp:encrypted-datagram
+                                      (ev:build-event kp 1 (make-string 2000 :initial-element #\x)) pub)
+                                     nil)
+                  (udp:datagram-too-large () t)))
+    (check-true "the ephemeral key never begins with '{' (60 datagrams)"
+                (loop repeat 60 never (= #x7b (aref (udp:encrypted-datagram ev pub) 0))))
+    (let ((rx (cl-transport.sockets:udp-open :admit (constantly t))))
+      (unwind-protect
+           (progn
+             (check "publish-datagram-encrypted returns the id"
+                    (udp:publish-datagram-encrypted "127.0.0.1" (cl-transport.sockets:udp-local-port rx)
+                                                    ev pub)
+                    (ev:event-id ev))
+             (let ((peer (cl-transport.sockets:udp-accept rx :timeout-ms 2000)))
+               (check-true "loopback receiver sees the encrypted datagram" peer)
+               (when peer
+                 (multiple-value-bind (got status)
+                     (cl-transport.sockets:udp-peer-read
+                      peer (+ (get-internal-real-time) (* 2 internal-time-units-per-second)))
+                   (check "the receiver opens it to the event"
+                          (and (eq status :ok)
+                               (ev:event-id (ev:json->event (u:utf8->string (udp:open-datagram relay got)))))
+                          (ev:event-id ev))))))
+        (cl-transport.sockets:udp-close rx)))))
+
+(defun test-udp ()
+  "One event as one datagram: the bytes parse back to the same signed event, the
+size bound refuses what would fragment, and a loopback receiver gets the bytes."
+  (format t "~&-- UDP datagrams --~%")
+  (let* ((kp (k:generate-keypair))
+         (ev (ev:build-event kp 1 (format nil "naïve ☃ ~a" (code-char #x1F600))))
+         (octets (udp:event->datagram ev))
+         (back (ignore-errors (ev:json->event (u:utf8->string octets)))))
+    (check-true "datagram fits one unfragmented frame" (<= (length octets) udp:+max-datagram+))
+    (check "datagram parses back to the same event id"
+           (and back (ev:event-id back)) (ev:event-id ev))
+    (check-true "the datagram's event verifies" (and back (ev:valid-event-p back)))
+    (check-true "an event past the bound is refused"
+                (handler-case (progn (udp:event->datagram
+                                      (ev:build-event kp 1 (make-string 2000 :initial-element #\x)))
+                                     nil)
+                  (udp:datagram-too-large (c) (> (udp:datagram-size c) udp:+max-datagram+))))
+    ;; a real receiver on loopback: admit every stranger, read the datagram back
+    (let ((rx (cl-transport.sockets:udp-open :admit (constantly t))))
+      (unwind-protect
+           (let ((id (udp:publish-datagram "127.0.0.1" (cl-transport.sockets:udp-local-port rx) ev)))
+             (check "publish-datagram returns the event id" id (ev:event-id ev))
+             (let ((peer (cl-transport.sockets:udp-accept rx :timeout-ms 2000)))
+               (check-true "loopback receiver sees the datagram" peer)
+               (when peer
+                 (multiple-value-bind (got status)
+                     (cl-transport.sockets:udp-peer-read
+                      peer (+ (get-internal-real-time) (* 2 internal-time-units-per-second)))
+                   (check "received bytes are the datagram"
+                          (and (eq status :ok) (equalp got octets)) t)))))
+        (cl-transport.sockets:udp-close rx)))))
+
 (defun run ()
   (setf *pass* 0 *fail* 0)
   (format t "~&=== cl-nostr offline gate ===~%")
@@ -398,6 +569,9 @@ unsigned rumor, and a wrap for someone else is refused."
   (test-deadline)
   (test-concurrent-signing)
   (test-nip59-rumor)
+  (test-udp)
+  (test-nip44-vectors)
+  (test-udp-encrypted)
   (format t "~%=== ~d passed, ~d failed ===~%" *pass* *fail*)
   (when (plusp *fail*) (error "cl-nostr offline gate: ~d failures" *fail*))
   t)

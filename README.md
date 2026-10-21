@@ -36,6 +36,14 @@ microarchitectural guarantee. Still unaudited; treat as educational. No warranty
   entities `nprofile`/`nevent`/`naddr`, with a `decode-entity` dispatcher.
 - **Filters (NIP-01)** — ids/authors/kinds/`#`-tags/since/until/limit/search,
   JSON serialization, and local matching (prefix match for ids/authors).
+- **UDP datagrams** — `publish-datagram` sends one signed event as one UDP
+  datagram (beacon's `--udp-port`; laantungir's "UDP nostr" design), and
+  `publish-datagram-encrypted` seals it to the relay's public key with NIP-44 v2,
+  under an ephemeral key that is sent in the clear as the datagram's first 32 bytes
+  (beacon's `--udp-secret`). Nothing is read back: the relay answers no datagram,
+  so this proves the bytes left the host, not that the event was stored.
+  `event->datagram` and the encrypted form refuse anything over 1472 bytes, the
+  largest unfragmented frame.
 - **Relay** — `wss://` connect (TLS via cl+ssl), `REQ`/`EVENT`/`CLOSE`, and
   dispatch of `EVENT`/`EOSE`/`OK`/`NOTICE`/`CLOSED` to per-subscription callbacks.
 - **Pool** — connect to many relays in parallel (timeout-bounded so one slow
@@ -118,6 +126,7 @@ src/
   event                 NIP-01: canonical serialization, id, sign, verify, JSON
   filter                NIP-01 subscription filters (JSON + local matching)
   relay                 one relay: websocket connect + message dispatch
+  udp                   one event as one UDP datagram (publish-datagram)
   pool                  multi-relay client: publish + subscribe + fetch + per-relay acks
   nip44/nip59/…         NIP-44 encryption, NIP-59 gift wrap, Double Ratchet
   blossom               Blossom BUD-01/02 blobs: bounded upload/download, fan-out
@@ -134,7 +143,8 @@ bin/cl-nostr.lisp       demo: stream the live global feed, verifying each note
 Pure SBCL + Quicklisp libs (`cl-base64`, `bordeaux-threads`) plus four
 modus-lisp siblings that aren't on Quicklisp: **`secp256k1-fast`** (Schnorr +
 ECDH), **`natrium`** (SHA-256, HMAC, HKDF, ChaCha20, secure random),
-**`seal`** (TLS, HTTP, WebSocket) and **`json-simple`** (JSON). No FFI. Put them where ASDF can find them — sibling
+**`seal`** (TLS, HTTP, WebSocket), **`json-simple`** (JSON) and **`cl-transport`**
+(its `sockets` system: UDP on sb-bsd-sockets, portable to modus). No FFI. Put them where ASDF can find them — sibling
 checkouts work with `run-all.sh`, or symlink them in:
 
 ```sh
@@ -142,6 +152,7 @@ ln -s /path/to/secp256k1-fast ~/quicklisp/local-projects/secp256k1-fast
 ln -s /path/to/natrium        ~/quicklisp/local-projects/natrium
 ln -s /path/to/seal           ~/quicklisp/local-projects/seal
 ln -s /path/to/json-simple    ~/quicklisp/local-projects/json-simple
+ln -s /path/to/cl-transport   ~/quicklisp/local-projects/cl-transport
 ln -s /path/to/cl-nostr       ~/quicklisp/local-projects/cl-nostr
 ```
 
@@ -185,6 +196,11 @@ sbcl --load bin/cl-nostr.lisp
 
 `inspect/offline-test.lisp` checks the pure layers against **published vectors**:
 
+- the **NIP-44 v2 vectors** (`inspect/nip44.vectors.json`, from paulmillr/nip44):
+  padding, all 35 conversation keys, the message keys, the encryptions
+  byte-exact under the vector's own nonce, the long messages by hash, and every
+  payload that must be refused. Before this, `nip44.lisp` claimed validation
+  against those vectors, but nothing in the gate ran them;
 - the **NIP-19 spec** examples (`npub`/`nsec` round-trips, `nsec → npub`
   derivation, the canonical `nprofile` TLV);
 - the real-world **"Walled gardens"** kind-1 event (fiatjaf) — its id is
