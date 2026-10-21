@@ -18,7 +18,7 @@ jobs:
       # line here.
       - name: Sibling checkouts
         run: |
-          for repo in secp256k1-fast seal natrium json-simple; do
+          for repo in secp256k1-fast seal natrium json-simple cl-transport; do
             git clone --depth 1 -q https://github.com/modus-lisp/$repo.git "$repo"
           done
 
