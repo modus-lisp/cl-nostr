@@ -51,20 +51,15 @@ PUBLISH-DATAGRAM-ENCRYPTED."
   (%send-datagram host port (event->datagram event))
   (ev:event-id event))
 
-(defun %secret-integer (keypair)
-  (let ((n 0))
-    (loop for b across (k:keypair-secret-key keypair) do (setf n (logior (ash n 8) b)))
-    n))
-
 (defun encrypt-datagram (ephemeral event relay-pubkey-hex)
   "EVENT sealed to RELAY-PUBKEY-HEX as one datagram: the ephemeral keypair's x-only
 pubkey (32 bytes), then the NIP-44 v2 payload of the event's JSON, under the conversation
 key between the ephemeral secret and the relay.  EPHEMERAL is used as given; see
 ENCRYPTED-DATAGRAM, which makes a fresh one.  Signals DATAGRAM-TOO-LARGE past the bound."
-  (let* ((conversation (nip44:conversation-key (%secret-integer ephemeral)
-                                               (u:hex->bytes relay-pubkey-hex)))
-         (payload (nip44:nip44-encrypt-octets-with-nonce
-                   (u:string->utf8 (ev:event->json event)) conversation (u:random-bytes 32)))
+  (let* ((payload (gossamer:with-fixed-scratch ((conversation :octets 32))
+                    (nip44::%conversation-key-into ephemeral (u:hex->bytes relay-pubkey-hex) conversation)
+                    (nip44:nip44-encrypt-octets-with-nonce
+                     (u:string->utf8 (ev:event->json event)) conversation (u:random-bytes 32))))
          (octets (concatenate '(simple-array (unsigned-byte 8) (*))
                               (u:hex->bytes (k:public-hex ephemeral)) payload)))
     (when (> (length octets) +max-datagram+)
@@ -76,7 +71,9 @@ ENCRYPTED-DATAGRAM, which makes a fresh one.  Signals DATAGRAM-TOO-LARGE past th
 '{' (0x7b): the relay tries plaintext JSON first, and an encrypted datagram opening with
 that byte would be taken for one.  The relay copes either way; the rule is applied here
 as well, so a sender never produces the ambiguous case."
-  (loop (let ((octets (encrypt-datagram (k:generate-keypair) event relay-pubkey-hex)))
+  (loop (let* ((ephemeral (k:generate-keypair))
+               (octets (unwind-protect (encrypt-datagram ephemeral event relay-pubkey-hex)
+                         (k:keypair-wipe ephemeral))))
           (unless (= (aref octets 0) #x7b) (return octets)))))
 
 (defun publish-datagram-encrypted (host port event relay-pubkey-hex)
@@ -88,6 +85,6 @@ an ephemeral key and random bytes, not the event.  Returns the event id."
 (defun open-datagram (relay-keypair datagram)
   "The plaintext octets of an encrypted DATAGRAM, opened with the relay's keypair.  The
 receiving side of ENCRYPTED-DATAGRAM.  Signals on any framing, key or MAC failure."
-  (nip44:nip44-decrypt-octets (nip44:conversation-key (%secret-integer relay-keypair)
-                                                      (subseq datagram 0 32))
-                              (subseq datagram 32)))
+  (gossamer:with-fixed-scratch ((conversation :octets 32))
+    (nip44::%conversation-key-into relay-keypair (subseq datagram 0 32) conversation)
+    (nip44:nip44-decrypt-octets conversation (subseq datagram 32))))

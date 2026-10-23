@@ -27,20 +27,21 @@
 seal is backdated for timing privacy; the rumor still carries the real time."
   (- (unix-now) (random max)))
 
-(defun %sec->int (sec)
-  "Coerce a secret key given as an integer, hex string, byte vector, or a
-cl-nostr KEYPAIR to the integer scalar used for signing / ECDH."
-  (etypecase sec
-    (integer sec)
-    (k:keypair (secp:bytes-to-int (k:keypair-secret-key sec)))
-    (string (secp:bytes-to-int (u:hex->bytes sec)))
-    (sequence (secp:bytes-to-int (coerce sec '(vector (unsigned-byte 8)))))))
+(defun %sender-keypair (sec)
+  "SEC as a KEYPAIR: a keypair as-is, or a fixed 32-byte secret (whose keypair shares
+its buffer).  Integers, hex and heap bytes are refused -- import them once with
+KEYPAIR-FROM-SECRET."
+  (if (k:keypair-p sec)
+      sec
+      (let ((sk (k:secret-key-of sec)))       ; borrows SEC's buffer: never wipe this keypair
+        (k::%make-keypair sk (k:public-key-of-secret sk)))))
 
-(defun %kp-from-int (sec-int)
-  (k:keypair-from-secret (secp:int-to-bytes32 sec-int)))
+(defun %pub-hex (sec) (u:bytes->hex (k:public-key-of-secret (k:secret-key-of sec))))
 
-(defun %pub-hex (sec-int)
-  (u:bytes->hex (sch:pubkey-xonly sec-int)))
+(defmacro %with-ephemeral ((kp) &body body)
+  "Bind KP to a throwaway keypair (secret generated in fixed memory), wiped on exit."
+  `(let ((,kp (k:generate-keypair)))
+     (unwind-protect (progn ,@body) (k:keypair-wipe ,kp))))
 
 (defun %tags->vec (tags)
   "cl-nostr tags (list of lists of strings) -> the vector-of-vectors JSON shape."
@@ -62,7 +63,7 @@ NIP-01 serializer so it matches what any client would compute."
 
 (defun build-giftwrap (sender-sec recipient-hex message &key after)
   "NIP-59: wrap MESSAGE for RECIPIENT-HEX (x-only pubkey hex) from SENDER-SEC
-(integer / hex / bytes / keypair).  Builds rumor(14) -> seal(13, by sender) ->
+(a keypair, or a fixed 32-byte secret).  Builds rumor(14) -> seal(13, by sender) ->
 gift wrap(1059, by an ephemeral key) and returns the kind-1059 cl-nostr EVENT
 to hand to pool-publish.
 
@@ -73,29 +74,26 @@ authoritative clock, and a reply generated within the same second as the
 question — or on a box whose clock trails the phone's by a little — otherwise
 sorts ABOVE the question in the recipient's client.  Seconds are the whole
 resolution Nostr offers, so this is not an edge case; it is most fast replies."
-  (let* ((sender-int (%sec->int sender-sec))
-         (sender-kp (%kp-from-int sender-int))
+  (let* ((sender-kp (%sender-keypair sender-sec))
          (sender-pub (k:public-hex sender-kp))
          (now (if after (max (unix-now) (1+ after)) (unix-now)))
          ;; rumor: the real message, unsigned, real timestamp
          (rumor-json (%rumor-json sender-pub now 14
                                   (list (list "p" recipient-hex)) message))
          ;; seal: rumor encrypted to recipient, signed by sender, backdated
-         (seal-content (nip44:nip44-encrypt sender-int recipient-hex rumor-json))
+         (seal-content (nip44:nip44-encrypt sender-kp recipient-hex rumor-json))
          (seal-ev (ev:build-event sender-kp 13 seal-content
                                   :tags '() :created-at (random-past-ts)))
-         (seal-json (ev:event->json seal-ev))
-         ;; wrap: seal encrypted to recipient, signed by a throwaway key.
-         ;; created_at stays ~now so relays/clients filtering `since:` fetch it.
-         (eph-int (secp:bytes-to-int (u:random-bytes 32)))
-         (eph-kp (%kp-from-int eph-int))
-         (wrap-content (nip44:nip44-encrypt eph-int recipient-hex seal-json)))
-    (ev:build-event eph-kp 1059 wrap-content
-                    :tags (list (list "p" recipient-hex)) :created-at now)))
+         (seal-json (ev:event->json seal-ev)))
+    ;; wrap: seal encrypted to recipient, signed by a throwaway key (wiped after).
+    ;; created_at stays ~now so relays/clients filtering `since:` fetch it.
+    (%with-ephemeral (eph-kp)
+      (ev:build-event eph-kp 1059 (nip44:nip44-encrypt eph-kp recipient-hex seal-json)
+                      :tags (list (list "p" recipient-hex)) :created-at now))))
 
 (defun unwrap-giftwrap (recipient-sec wrap-event &key (verify t))
   "Recipient side: 1059 -> seal -> rumor.  WRAP-EVENT is a cl-nostr EVENT (as
-delivered by pool-subscribe); RECIPIENT-SEC is our secret (int/hex/bytes/keypair).
+delivered by pool-subscribe); RECIPIENT-SEC is our secret (a keypair or fixed secret).
 Returns (values plaintext sender-pubkey-hex created_at), where SENDER-PUBKEY-HEX is
 the AUTHENTICATED sender: the key that signed the seal.
 
@@ -104,7 +102,7 @@ equal the seal's signer — otherwise the sender is forgeable (an attacker seals
 their own key, a rumor whose pubkey names someone else, and a naive reader trusts the
 rumor's claim).  A failure signals an error (fail closed).  Pass :VERIFY NIL only when
 the caller does its own checking."
-  (let* ((sec (%sec->int recipient-sec))
+  (let* ((sec (%sender-keypair recipient-sec))
          (seal-json (nip44:nip44-decrypt sec (ev:event-pubkey wrap-event)
                                          (ev:event-content wrap-event)))
          (seal (ev:json->event seal-json))
@@ -133,17 +131,15 @@ the caller does its own checking."
   "NIP-59: wrap an unsigned rumor of KIND / TAGS / CONTENT, authored by
 SENDER-SEC, for RECIPIENT-HEX.  The seal is backdated as in BUILD-GIFTWRAP; the
 rumor keeps CREATED-AT (default now).  Returns the kind-1059 EVENT."
-  (let* ((sender-int (%sec->int sender-sec))
-         (sender-kp (%kp-from-int sender-int))
+  (let* ((sender-kp (%sender-keypair sender-sec))
          (sender-pub (k:public-hex sender-kp))
          (now (unix-now))
          (rumor-json (%rumor-json sender-pub (or created-at now) kind tags content))
-         (seal-ev (ev:build-event sender-kp 13 (nip44:nip44-encrypt sender-int recipient-hex rumor-json)
-                                  :tags '() :created-at (random-past-ts)))
-         (eph-int (secp:bytes-to-int (u:random-bytes 32)))
-         (eph-kp (%kp-from-int eph-int)))
-    (ev:build-event eph-kp 1059 (nip44:nip44-encrypt eph-int recipient-hex (ev:event->json seal-ev))
-                    :tags (list (list "p" recipient-hex)) :created-at now)))
+         (seal-ev (ev:build-event sender-kp 13 (nip44:nip44-encrypt sender-kp recipient-hex rumor-json)
+                                  :tags '() :created-at (random-past-ts))))
+    (%with-ephemeral (eph-kp)
+      (ev:build-event eph-kp 1059 (nip44:nip44-encrypt eph-kp recipient-hex (ev:event->json seal-ev))
+                      :tags (list (list "p" recipient-hex)) :created-at now))))
 
 (defun unwrap-rumor (recipient-sec wrap-event)
   "Open a kind-1059 WRAP-EVENT addressed to RECIPIENT-SEC.  Returns (values
@@ -151,8 +147,8 @@ RUMOR SEAL): RUMOR is an unsigned EVENT (id set, no sig).  Fails closed unless
 the wrap verifies and has exactly one p tag naming us, the seal is a verified
 kind 13, the rumor's pubkey is the seal's signer, and the rumor id matches its
 contents."
-  (let* ((sec (%sec->int recipient-sec))
-         (me (%pub-hex sec)))
+  (let* ((sec (%sender-keypair recipient-sec))
+         (me (k:public-hex sec)))
     (unless (and (= (ev:event-kind wrap-event) 1059) (ev:verify-event wrap-event))
       (error "gift wrap: not a valid kind-1059 event"))
     (let ((ps (ev:tag-values wrap-event "p")))

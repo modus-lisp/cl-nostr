@@ -20,6 +20,8 @@
                     (#:pool #:cl-nostr.pool)
                     (#:blossom #:cl-nostr.blossom)
                     (#:nsite #:cl-nostr.nsite)
+                    (#:nip44 #:cl-nostr.nip44)
+                    (#:dr #:cl-nostr.double-ratchet)
                     (#:nip59 #:cl-nostr.nip59)
                     (#:udp #:cl-nostr.udp)
                     (#:nip44 #:cl-nostr.nip44)
@@ -380,9 +382,6 @@ unsigned rumor, and a wrap for someone else is refused."
     (check-true "a wrap for bob is refused to alice"
                 (handler-case (progn (nip59:unwrap-rumor alice wrap) nil) (error () t)))))
 
-(defun be-int (octets)
-  (reduce (lambda (acc b) (+ (ash acc 8) b)) octets :initial-value 0))
-
 (defun nip44-section (section &optional (kind "valid"))
   "A section of the official NIP-44 v2 vectors (inspect/nip44.vectors.json)."
   (let ((root (json-simple:parse (uiop:read-file-string
@@ -400,17 +399,18 @@ the lengths that must be refused, and the payloads that must be refused."
   (let ((rows (nip44-section "get_conversation_key")))
     (check-true (format nil "conversation keys (~d)" (length rows))
                 (every (lambda (r)
-                         (equalp (nip44:conversation-key (be-int (u:hex->bytes (gethash "sec1" r)))
-                                                         (u:hex->bytes (gethash "pub2" r)))
-                                 (u:hex->bytes (gethash "conversation_key" r))))
+                         (let* ((kp (k:keypair-from-secret (gethash "sec1" r)))
+                                (ck (nip44:conversation-key kp (u:hex->bytes (gethash "pub2" r)))))
+                           (prog1 (equalp ck (u:hex->bytes (gethash "conversation_key" r)))
+                             (gossamer:free ck) (k:keypair-wipe kp))))
                        rows)))
   (let* ((section (nip44-section "get_message_keys"))
          (ck (u:hex->bytes (gethash "conversation_key" section)))
          (keys (gethash "keys" section)))
     (check-true (format nil "message keys (~d)" (length keys))
                 (every (lambda (k)
-                         (multiple-value-bind (ck-key ck-nonce hmac-key)
-                             (nip44::message-keys ck (u:hex->bytes (gethash "nonce" k)))
+                         (nip44::with-message-keys (ck-key ck-nonce hmac-key)
+                             ck (u:hex->bytes (gethash "nonce" k))
                            (and (equalp ck-key (u:hex->bytes (gethash "chacha_key" k)))
                                 (equalp ck-nonce (u:hex->bytes (gethash "chacha_nonce" k)))
                                 (equalp hmac-key (u:hex->bytes (gethash "hmac_key" k))))))
@@ -548,6 +548,66 @@ size bound refuses what would fragment, and a loopback receiver gets the bytes."
                    (check "received bytes are the datagram"
                           (and (eq status :ok) (equalp got octets)) t)))))
         (cl-transport.sockets:udp-close rx)))))
+(defun test-nip44-gossamer-keys ()
+  "NIP-44 with the private keys as gossamer secrets: the conversation key comes back
+in non-moving memory, the keypair path agrees with the vectors, and an integer key
+is refused."
+  (format t "~&~%NIP-44 with gossamer keys:~%")
+  (flet ((kp (hex) (k:keypair-from-secret hex)))
+    (let ((ck (nip44:conversation-key (kp "315e59ff51cb9209768cf7da80791ddcaae56ac9775eb25b6dee1234bc5d2268")
+                                      (u:hex->bytes "c2f9d9948dc8c7c38321e4b85c8558872eafa0641cd269db76848a6073e69133"))))
+      (check "conversation key (vector 0)" (u:bytes->hex ck)
+             "3dfef0ce2a4d80a25e7a328accf73448ef67096f65f79588e358d9a0eb9013f1")
+      (check-true "conversation key is in fixed memory" (gossamer:fixed-p ck)))
+    (let* ((a (kp "0000000000000000000000000000000000000000000000000000000000000001"))
+           (b (kp "0000000000000000000000000000000000000000000000000000000000000002"))
+           (ck (nip44:conversation-key a (k:keypair-public-key b)))
+           (nonce (u:hex->bytes "0000000000000000000000000000000000000000000000000000000000000001"))
+           (payload (nip44:nip44-encrypt-with-nonce (u:string->utf8 "a") ck nonce)))
+      (check "encrypt conversation key" (u:bytes->hex ck)
+             "c41c775356fd92eadc63ff5a0dc1da211b268cbea22316767095b2871ea1412d")
+      (check "encrypt payload (vector 0)" payload
+             "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABee0G5VSK0/9YypIObAtDKfYEAjD35uVkHyB0F4DwrcNaCXlCWZKaArsGrY6M9wnuTMxWfp1RTN9Xga8no+kF5Vsb")
+      (check "decrypt payload" (nip44:nip44-decrypt-ck payload ck) "a")
+      (check "decrypt via the peer's key" (nip44:nip44-decrypt b (k:public-hex a) (nip44:nip44-encrypt a (k:public-hex b) "hello")) "hello"))
+    (check-true "an integer secret is refused"
+                (handler-case (progn (nip44:nip44-encrypt 1 (make-string 64 :initial-element #\0) "x") nil) (error () t)))))
+
+(defun test-double-ratchet ()
+  "Two double-ratchet sessions talk: in order, out of order, after a persist/restore,
+and every key buffer goes back to the pool when the sessions are freed."
+  (format t "~&~%Double ratchet:~%")
+  (let* ((free0 (nth-value 1 (gossamer:pool-stats)))
+         (shared (gossamer:make-fixed-octets 32))
+         (alice-eph (dr:gen-priv)) (bob-eph (dr:gen-priv)))
+    (natrium:random-bytes-into shared)
+    (let* ((alice (dr:dr-init (dr:priv->pub-hex bob-eph) alice-eph nil shared))   ; responder
+           (bob   (dr:dr-init (dr:priv->pub-hex alice-eph) bob-eph t shared)))     ; sends first
+      (flet ((text (rumor) (and rumor (gethash "content" rumor))))
+        (let ((m1 (dr:dr-send-event bob "hi alice")))
+          (check "first message decrypts" (text (dr:dr-receive-event alice m1)) "hi alice"))
+        (check-true "the responder can now reply" (dr:dr-can-send-p alice))
+        (check "reply decrypts" (text (dr:dr-receive-event bob (dr:dr-send-event alice "hi bob"))) "hi bob")
+        (let ((a (dr:dr-send-event bob "one")) (b (dr:dr-send-event bob "two")) (c (dr:dr-send-event bob "three")))
+          (check "out of order: third first" (text (dr:dr-receive-event alice c)) "three")
+          (check "then the first (skipped key)" (text (dr:dr-receive-event alice a)) "one")
+          (check "then the second (skipped key)" (text (dr:dr-receive-event alice b)) "two")
+          (check "a replay is refused" (dr:dr-receive-event alice b) nil))
+        (let ((json (dr:dr-state->json alice)))
+          (dr:dr-free alice)
+          (setf alice (dr:json->dr-state json))
+          (check "after persist/restore the session still decrypts"
+                 (text (dr:dr-receive-event alice (dr:dr-send-event bob "after restore"))) "after restore")
+          (check "and still replies"
+                 (text (dr:dr-receive-event bob (dr:dr-send-event alice "back at you"))) "back at you"))
+        (check-true "a garbage event leaves the state intact"
+                    (and (null (dr:dr-receive-event alice (dr:dr-send-event alice "to myself")))
+                         (equal (text (dr:dr-receive-event alice (dr:dr-send-event bob "still fine"))) "still fine"))))
+      (dr:dr-free alice) (dr:dr-free bob))
+    (dr:dr-free-key alice-eph) (dr:dr-free-key bob-eph)
+    (multiple-value-bind (allocated free) (gossamer:pool-stats)
+      (declare (ignore allocated))
+      (check-true "every key buffer went back to the pool" (>= free free0)))))
 
 (defun run ()
   (setf *pass* 0 *fail* 0)
@@ -571,7 +631,9 @@ size bound refuses what would fragment, and a loopback receiver gets the bytes."
   (test-nip59-rumor)
   (test-udp)
   (test-nip44-vectors)
+  (test-nip44-gossamer-keys)
   (test-udp-encrypted)
+  (test-double-ratchet)
   (format t "~%=== ~d passed, ~d failed ===~%" *pass* *fail*)
   (when (plusp *fail*) (error "cl-nostr offline gate: ~d failures" *fail*))
   t)

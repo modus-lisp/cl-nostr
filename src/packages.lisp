@@ -23,7 +23,7 @@
   (:export
    #:*curve-lock*
    #:keypair #:make-keypair #:generate-keypair #:keypair-from-secret
-   #:keypair-secret-key #:keypair-public-key
+   #:keypair-secret-key #:keypair-public-key #:keypair-p #:keypair-wipe #:secret-key-of
    #:secret-hex #:public-hex #:public-key-of-secret
    #:sign #:verify))
 
@@ -144,7 +144,8 @@
    #:dr-init #:dr-send-event #:dr-receive-event
    #:dr-session #:make-public-invite #:decrypt-invite-response
    #:session-from-invite-response #:dr-state->json #:json->dr-state
-   #:gen-priv #:priv->pub-hex #:ck #:kdf
+   #:gen-priv #:priv->pub-hex #:ck #:kdf #:kdf-into #:with-ck
+   #:dr-free #:dr-free-key
    #:*message-kind* #:*invite-kind* #:*invite-response-kind* #:*chat-kind*
    #:dr-our-current-pub #:dr-their-next-pub #:dr-their-current-pub
    #:dr-can-send-p))
